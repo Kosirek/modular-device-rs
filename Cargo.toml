@@ -1,0 +1,76 @@
+[package]
+name = "um_rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the LPC1768 'UM' sensor-logging firmware, structured for host unit testing."
+license = "MIT"
+
+# A std library + demo binary. The hardware is abstracted behind traits in
+# `hal`, so all business logic is unit-tested on the host. Porting to a real
+# `no_std` LPC1768 target means implementing the HAL traits for the MCU
+# peripherals; the driver/protocol logic stays unchanged.
+[lib]
+name = "um_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "um_demo"
+path = "src/main.rs"
+# The demo uses println!/std and is host-only. It is skipped automatically when
+# building the library for a bare-metal target (e.g. with `--no-default-features`).
+required-features = ["std"]
+
+[[bin]]
+name = "um_firmware"
+path = "src/firmware.rs"
+# The real no_std firmware entry point for flashing to the LPC1768.
+required-features = ["firmware"]
+
+[features]
+default = ["std"]
+# `std` is only needed by the host demo binary and the test harness. The library
+# itself is `no_std` (+ `alloc`) whenever it is not compiled for tests.
+std = []
+# Enable the bare-metal firmware binary (requires thumbv7m-none-eabi target).
+firmware = ["dep:cortex-m", "dep:cortex-m-rt", "dep:panic-halt", "dep:embedded-alloc"]
+
+[dependencies]
+# Standard embedded-rust HAL traits. Drivers are written against these so the
+# crate plugs into any real LPC1768 HAL implementation.
+embedded-hal = "1.0"
+heapless = { version = "0.8", default-features = false }
+# SD-over-SPI block driver + FAT filesystem (replaces the hand-written
+# `sdcard`/`fat16` modules). `defmt-log`/`log` features are left off for no_std.
+embedded-sdmmc = { version = "0.9", default-features = false }
+# Bare-metal Cortex-M runtime (vector table, entry point, memory init).
+# Only pulled in when building the firmware binary.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"], optional = true }
+cortex-m-rt = { version = "0.7", optional = true }
+panic-halt = { version = "1.0", optional = true }
+# Heap allocator for no_std targets (provides #[global_allocator]).
+embedded-alloc = { version = "0.6", optional = true }
+
+[dev-dependencies]
+rstest = "0.26.1"
+mockall = "0.14.0"
+# Mocks for the embedded-hal traits (SPI/I2C/digital) used in driver tests.
+embedded-hal-mock = { version = "0.11", default-features = false, features = ["eh1"] }
+# Used only to build a formatted FAT16 image (with an MBR) for the storage
+# round-trip tests, since embedded-sdmmc cannot format a volume itself.
+fatfs = "0.3"
+
+[profile.test]
+opt-level = 0
+
+# Size- and speed-tuned release profile suitable for flashing to the LPC1768.
+# `opt-level = "z"` minimises code size, LTO + a single codegen unit let the
+# optimiser inline across modules, and `panic = "abort"` drops the unwinding
+# machinery that a Cortex-M3 image cannot use anyway.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+debug = false
+strip = false

@@ -1,0 +1,12 @@
+# Default target for bare-metal builds (LPC1768 = Cortex-M3, Thumb-only).
+# Host builds (tests, um_demo) override this with `--target x86_64-...` or
+# simply omit `--no-default-features`, which keeps the `std` feature active.
+[build]
+# Uncomment the line below to default every `cargo build` to the MCU target:
+# target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+# Use rust-lld (bundled) for linking bare-metal Cortex-M3.
+rustflags = ["-C", "link-arg=-Tlink.x"]
+# After `cargo build`, automatically run objcopy to produce a flashable .bin.
+runner = "arm-none-eabi-objcopy -O binary"

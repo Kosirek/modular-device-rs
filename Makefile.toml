@@ -1,0 +1,66 @@
+# Makefile.toml — cargo-make task definitions for building flashable .bin images
+# from the Rust no_std library crate targeting thumbv7m-none-eabi (LPC1768 / Cortex-M3).
+#
+# Usage:
+#   cargo make debug        — build unoptimised ELF + .bin
+#   cargo make release      — build size-optimised ELF + .bin
+#   cargo make all          — both debug and release
+#   cargo make size         — print section sizes of the release ELF
+#   cargo make clean        — remove target/
+
+[env]
+TARGET = "thumbv7m-none-eabi"
+PROJ = "um_firmware"
+DBG_ELF = "target/${TARGET}/debug/${PROJ}"
+REL_ELF = "target/${TARGET}/release/${PROJ}"
+DBG_BIN = "target/${TARGET}/debug/${PROJ}.bin"
+REL_BIN = "target/${TARGET}/release/${PROJ}.bin"
+
+# --- Debug ------------------------------------------------------------------
+
+[tasks.build-debug]
+description = "Build debug ELF for Cortex-M3"
+command = "cargo"
+args = ["build", "--target", "${TARGET}", "--no-default-features", "--features", "firmware", "--bin", "um_firmware"]
+
+[tasks.bin-debug]
+description = "Generate debug .bin from ELF"
+dependencies = ["build-debug"]
+command = "arm-none-eabi-objcopy"
+args = ["-O", "binary", "${DBG_ELF}", "${DBG_BIN}"]
+
+[tasks.debug]
+description = "Build debug ELF + .bin"
+dependencies = ["bin-debug"]
+
+# --- Release -----------------------------------------------------------------
+
+[tasks.build-release]
+description = "Build release ELF for Cortex-M3"
+command = "cargo"
+args = ["build", "--target", "${TARGET}", "--no-default-features", "--features", "firmware", "--bin", "um_firmware", "--release"]
+
+[tasks.bin-release]
+description = "Generate release .bin from ELF"
+dependencies = ["build-release"]
+command = "arm-none-eabi-objcopy"
+args = ["-O", "binary", "${REL_ELF}", "${REL_BIN}"]
+
+[tasks.release]
+description = "Build release ELF + .bin"
+dependencies = ["bin-release"]
+
+# --- Convenience -------------------------------------------------------------
+
+[tasks.all]
+description = "Build both debug and release .bin images"
+dependencies = ["debug", "release"]
+
+[tasks.size]
+description = "Print section sizes of the release ELF"
+dependencies = ["build-release"]
+command = "arm-none-eabi-size"
+args = ["${REL_ELF}"]
+
+[tasks.default]
+alias = "all"
