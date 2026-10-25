@@ -73,10 +73,7 @@ pub enum TelemetryRecord {
     /// Decoded GPS timestamp and coordinates.
     Gps(GpsData),
     /// Temperatures and supply voltage.
-    Temperature {
-        temp: [f32; 3],
-        power_volt: f32,
-    },
+    Temperature { temp: [f32; 3], power_volt: f32 },
     /// Custom / arbitrary telemetry string.
     Custom(String),
 }
@@ -129,6 +126,26 @@ impl<S: LogSink> DataLogger<S> {
     /// `true` if logging is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// `true` if log file has been opened.
+    pub fn is_opened(&self) -> bool {
+        self.opened
+    }
+
+    /// Access the underlying sink.
+    pub fn sink(&self) -> &S {
+        &self.sink
+    }
+
+    /// Mutably access the underlying sink.
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
+    }
+
+    /// Number of lines currently queued in memory waiting for batch commit.
+    pub fn buffered_count(&self) -> usize {
+        self.buffered_lines.len()
     }
 
     /// Open the log file, writing the startup RTC timestamp and banner.
@@ -304,9 +321,12 @@ mod tests {
 
         let rtc = sample_rtc();
         logger.open(&rtc).unwrap();
+        assert!(logger.is_opened());
 
         let acc = AccSample { x: 1, y: 2, z: 3 };
-        logger.log_record(&TelemetryRecord::Accelerometer(acc)).unwrap();
+        logger
+            .log_record(&TelemetryRecord::Accelerometer(acc))
+            .unwrap();
 
         let lines = sink.lines.borrow();
         assert_eq!(lines.len(), 2);
@@ -321,8 +341,13 @@ mod tests {
         logger.open(&sample_rtc()).unwrap();
 
         logger.set_enabled(false);
+        assert!(!logger.is_enabled());
         logger
-            .log_record(&TelemetryRecord::Accelerometer(AccSample { x: 0, y: 0, z: 0 }))
+            .log_record(&TelemetryRecord::Accelerometer(AccSample {
+                x: 0,
+                y: 0,
+                z: 0,
+            }))
             .unwrap();
 
         assert_eq!(sink.lines.borrow().len(), 1); // only the open line
@@ -337,11 +362,36 @@ mod tests {
         // Write 2 records (< threshold 3) -> should not write to sink yet
         logger.log_raw("line 1").unwrap();
         logger.log_raw("line 2").unwrap();
+        assert_eq!(logger.buffered_count(), 2);
         assert_eq!(sink.lines.borrow().len(), 1); // only open line
 
         // Sync flushes pending batch
         logger.sync().unwrap();
+        assert_eq!(logger.buffered_count(), 0);
         assert_eq!(sink.lines.borrow().len(), 3);
         assert_eq!(*sink.flushed.borrow(), 1);
+    }
+
+    #[test]
+    fn data_logger_timestamp_logging() {
+        let sink = MockSink::default();
+        let mut logger = DataLogger::new(sink.clone());
+        let rtc = sample_rtc();
+        logger.open(&rtc).unwrap();
+        logger.log_timestamp(&rtc).unwrap();
+
+        let lines = sink.lines.borrow();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "2024-11-07 14:30:15  ");
+    }
+
+    #[test]
+    fn data_logger_accessors() {
+        let sink = MockSink::default();
+        let mut logger = DataLogger::new(sink);
+        assert!(!logger.is_opened());
+        assert!(logger.is_enabled());
+        let _ = logger.sink();
+        let _ = logger.sink_mut();
     }
 }

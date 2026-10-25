@@ -36,6 +36,8 @@ tested off-target. This port applies a few principles:
 | `arp.c`             | `arp`                  | request/reply state machine                      |
 | `dhcp.c`            | `dhcp`                 | DISCOVER→OFFER→REQUEST→ACK, option TLV parsin    |
 | `mainPrg.c ENET_IRQ`| `net_stack`            | packet dispatching (ARP auto-reply, DHCP client, UDP routing) |
+| `mainPrg.c logging` | `telemetry`            | sensor formatting (`DATA.LOG`), batched SD logging, sync |
+| `mainPrg.c main()`  | `app`                  | super-loop scheduling, SW1..SW5 keys, telemetry dispatch |
 | `25lc1024.c`        | `eeprom`               | SPI command/address sequencing (`embedded-hal` SpiDevice) |
 | `akcelerometr.c`    | `accelerometer`        | signed-axis conversion (`embedded-hal` SpiDevice)|
 | `kompas.c`          | `compass`              | heading/pitch/roll decode (`embedded-hal` I2c)   |
@@ -96,7 +98,6 @@ so none of that protocol/filesystem code is hand-maintained here.
 The `storage` module adds the one thing the firmware actually needs on top:
 `storage::SdLogSink` wraps a `VolumeManager` and implements `hal::LogSink` by
 appending each line to `DEBUG.LOG` (open in append mode → write → close),
-exactly what `logs.c` does with `f_open`/`f_lseek`/`f_write`. So
 `logs::Logger` can write straight to the card.
 
 On hardware you build the manager from

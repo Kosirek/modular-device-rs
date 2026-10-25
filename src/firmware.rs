@@ -32,13 +32,25 @@ fn main() -> ! {
         }
     }
 
-    // TODO: initialise LPC1768 peripherals, construct HAL trait objects,
-    // and wire them into the um_rust driver modules.
+    // Peripheral initialization and App super-loop:
     //
-    // Example (pseudo-code):
-    //   let spi = LpcSpi::new(..);
-    //   let eeprom = um_rust::eeprom::Eeprom::new(spi);
-    //   ...
+    // 1. Initialise LPC1768 peripheral wrappers implementing hal traits:
+    //    * EMAC -> hal::EthernetDevice
+    //    * SD/SPI -> hal::LogSink (via embedded-sdmmc and storage::SdLogSink)
+    //    * Sensors -> Accelerometer, Compass, Temperature, Gps, Keypad
+    //
+    // 2. Wire into application coordinator:
+    //    let net_stack = um_rust::net_stack::NetworkStack::new(emac, eth_config);
+    //    let logger = um_rust::telemetry::DataLogger::new(sd_log_sink);
+    //    let mut app = um_rust::app::App::new(net_stack, logger, app_config);
+    //    app.start(0, &rtc_time).unwrap();
+    //
+    // 3. Super-loop execution:
+    //    loop {
+    //        let now_ticks = timer.now();
+    //        app.step(now_ticks, inputs).ok();
+    //        cortex_m::asm::wfi();
+    //    }
 
     loop {
         cortex_m::asm::wfi();

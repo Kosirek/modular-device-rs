@@ -5,17 +5,44 @@
 //! runs on a PC and shows the modules cooperating. This is **not** the embedded
 //! target image — it exists to exercise the library end-to-end.
 
+use um_rust::accelerometer::AccSample;
+use um_rust::app::{App, AppConfig, SensorInputs};
 use um_rust::arp::{ArpEvent, ArpResolver};
+use um_rust::compass::Orientation;
 use um_rust::dhcp::{DhcpAction, DhcpClient};
 use um_rust::gps::GpsReceiver;
+use um_rust::hal::{EthernetConfig, EthernetDevice, HalResult, LogSink};
 use um_rust::net::chksum16;
+use um_rust::net_stack::NetworkStack;
 use um_rust::pressure::{convert, PressureCalibration};
 use um_rust::rtc::TimeStruct;
+use um_rust::telemetry::DataLogger;
 use um_rust::temperature::{iir, raw_to_value};
 use um_rust::timer::SystemTimer;
 use um_rust::udp::{build_udp_frame, Endpoint};
 
 const LOCAL_MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+struct DemoEthernet;
+impl EthernetDevice for DemoEthernet {
+    fn transmit(&mut self, _packet: &[u8]) -> HalResult<()> {
+        Ok(())
+    }
+    fn receive(&mut self, _buffer: &mut [u8]) -> HalResult<Option<usize>> {
+        Ok(None)
+    }
+}
+
+struct DemoLogSink(Vec<String>);
+impl LogSink for DemoLogSink {
+    fn write_line(&mut self, line: &str) -> HalResult<()> {
+        self.0.push(line.to_string());
+        Ok(())
+    }
+    fn flush(&mut self) -> HalResult<()> {
+        Ok(())
+    }
+}
 
 fn main() {
     println!("== um_rust demo ==");
@@ -109,6 +136,35 @@ fn main() {
             dhcp.state
         );
     }
+
+    // --- App Super-Loop ---
+    let eth_cfg = EthernetConfig::default();
+    let net_stack = NetworkStack::new(DemoEthernet, eth_cfg);
+    let logger = DataLogger::new(DemoLogSink(Vec::new()));
+    let mut app = App::new(net_stack, logger, AppConfig::default());
+    app.start(timer.now(), &now).expect("app start");
+
+    let inputs = SensorInputs {
+        keys: Some(0),
+        acc: Some(AccSample {
+            x: 5,
+            y: -10,
+            z: 120,
+        }),
+        compass: Some(Orientation {
+            heading: 180.0,
+            pitch: 0.0,
+            roll: 0.0,
+        }),
+        gps: Some(gps.data()),
+        temp: Some(([21.5, 22.0, 23.5], 12.3)),
+        rtc: Some(&now),
+    };
+    let report = app.step(50000, inputs).expect("app step");
+    println!(
+        "app: step at 50000 ticks: acc={}, compass_gps={}, temp={}, sync={}",
+        report.acc_emitted, report.compass_gps_emitted, report.temp_emitted, report.file_synced
+    );
 
     println!("== done ==");
 }

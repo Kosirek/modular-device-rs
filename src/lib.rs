@@ -29,6 +29,7 @@ extern crate alloc;
 pub mod hal;
 
 pub mod accelerometer;
+pub mod app;
 pub mod arp;
 pub mod compass;
 pub mod dhcp;
@@ -42,6 +43,7 @@ pub mod nmea;
 pub mod pressure;
 pub mod rtc;
 pub mod storage;
+pub mod telemetry;
 pub mod temperature;
 pub mod timer;
 pub mod udp;

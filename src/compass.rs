@@ -13,7 +13,7 @@ pub const COMPASS_ADDR: u8 = 0x32 >> 1;
 pub const GET_DATA: u8 = 0x31;
 
 /// Decoded orientation, all in degrees.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Orientation {
     /// Heading 0..360 (`kurs`).
     pub heading: f32,

@@ -327,4 +327,37 @@ mod tests {
         sink.write_line("custom line").unwrap();
         assert_eq!(sink.read_all().unwrap(), b"custom line\n");
     }
+
+    #[test]
+    fn integrates_with_data_logger() {
+        use crate::accelerometer::AccSample;
+        use crate::rtc::TimeStruct;
+        use crate::telemetry::{DataLogger, TelemetryRecord};
+
+        let sink = make_sink();
+        let mut logger = DataLogger::with_batching(sink, 2);
+        let t = TimeStruct {
+            year: 2024,
+            month: 11,
+            day_of_month: 7,
+            hour: 14,
+            minute: 30,
+            second: 15,
+            ..Default::default()
+        };
+        logger.open(&t).unwrap();
+        logger
+            .log_record(&TelemetryRecord::Accelerometer(AccSample {
+                x: 10,
+                y: -20,
+                z: 30,
+            }))
+            .unwrap();
+        logger.sync().unwrap();
+
+        let sink = logger.into_sink().unwrap();
+        let text = String::from_utf8(sink.read_all().unwrap()).unwrap();
+        assert!(text.contains("2024-11-07 14:30:15  Start logging ..."));
+        assert!(text.contains("Accelerometer-X10,Y-20,Z30*"));
+    }
 }
