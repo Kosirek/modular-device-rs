@@ -106,14 +106,29 @@ impl<D: EthernetDevice> NetworkStack<D> {
         self.current_ip
     }
 
+    /// Override the operational IPv4 address.
+    pub fn set_current_ip(&mut self, ip: [u8; IPV4_ADDRESS_LENGTH]) {
+        self.current_ip = ip;
+    }
+
     /// Current operational subnet mask.
     pub fn subnet_mask(&self) -> [u8; IPV4_ADDRESS_LENGTH] {
         self.current_subnet
     }
 
+    /// Override the operational subnet mask.
+    pub fn set_subnet_mask(&mut self, subnet: [u8; IPV4_ADDRESS_LENGTH]) {
+        self.current_subnet = subnet;
+    }
+
     /// Current operational default gateway.
     pub fn gateway(&self) -> [u8; IPV4_ADDRESS_LENGTH] {
         self.current_gateway
+    }
+
+    /// Override the operational default gateway.
+    pub fn set_gateway(&mut self, gateway: [u8; IPV4_ADDRESS_LENGTH]) {
+        self.current_gateway = gateway;
     }
 
     /// `true` if DHCP has completed and a lease is active.

@@ -93,6 +93,23 @@ impl Default for AppConfig {
     }
 }
 
+impl From<&crate::nvram::NvramConfig> for AppConfig {
+    fn from(cfg: &crate::nvram::NvramConfig) -> Self {
+        Self {
+            acc_interval: cfg.acc_interval,
+            led_interval: cfg.led_interval,
+            temp_interval: cfg.temp_interval,
+            pressure_interval: cfg.pressure_interval,
+            key_interval: DEFAULT_KEY_INTERVAL,
+            file_sync_interval: cfg.file_sync_interval,
+            link_interval: DEFAULT_LINK_INTERVAL,
+            local_port: cfg.local_port,
+            remote_port: cfg.remote_port,
+            command_port: cfg.command_port,
+        }
+    }
+}
+
 /// Dynamic runtime state of the application super-loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppState {
@@ -234,6 +251,9 @@ pub struct App<D: EthernetDevice, S: LogSink> {
     logger: DataLogger<S>,
     config: AppConfig,
     state: AppState,
+    power_mask: u8,
+    reboot_requested: bool,
+    phy_link_up: bool,
 }
 
 impl<D: EthernetDevice, S: LogSink> App<D, S> {
@@ -245,6 +265,9 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
             logger,
             config,
             state,
+            power_mask: crate::power::DEFAULT_BOARD_POWER_MASK,
+            reboot_requested: false,
+            phy_link_up: true,
         }
     }
 
@@ -302,6 +325,109 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
     /// Manually enable or disable Ethernet UDP broadcasting.
     pub fn set_eth_enabled(&mut self, enabled: bool) {
         self.state.eth_on = enabled;
+    }
+
+    /// Current peripheral power rails bitmask.
+    pub fn power_mask(&self) -> u8 {
+        self.power_mask
+    }
+
+    /// Set peripheral power rails bitmask.
+    pub fn set_power_mask(&mut self, mask: u8) {
+        self.power_mask = mask;
+    }
+
+    /// Toggle a specific peripheral power domain.
+    pub fn set_power_domain(&mut self, domain: crate::power::PowerDomain, on: bool) {
+        if on {
+            self.power_mask |= domain.mask();
+        } else {
+            self.power_mask &= !domain.mask();
+        }
+    }
+
+    /// Turn all peripheral power rails on or off.
+    pub fn set_all_power(&mut self, on: bool) {
+        self.power_mask = if on { 0xFF } else { 0x00 };
+    }
+
+    /// Check if a software reboot has been requested via remote command.
+    pub fn is_reboot_requested(&self) -> bool {
+        self.reboot_requested
+    }
+
+    /// Request a software reboot.
+    pub fn request_reboot(&mut self) {
+        self.reboot_requested = true;
+    }
+
+    /// Clear the pending software reboot flag.
+    pub fn clear_reboot_request(&mut self) {
+        self.reboot_requested = false;
+    }
+
+    /// Physical Ethernet PHY link state.
+    pub fn phy_link_up(&self) -> bool {
+        self.phy_link_up
+    }
+
+    /// Update physical Ethernet PHY link state.
+    pub fn set_phy_link_up(&mut self, up: bool) {
+        self.phy_link_up = up;
+    }
+
+    /// Apply persistent settings loaded from NVRAM configuration.
+    pub fn apply_nvram_config(&mut self, nvram: &crate::nvram::NvramConfig) {
+        self.config = AppConfig::from(nvram);
+        self.power_mask = nvram.default_power_mask;
+        self.net.set_current_ip(nvram.ip);
+        self.net.set_subnet_mask(nvram.subnet);
+        self.net.set_gateway(nvram.gateway);
+    }
+
+    /// Export current active settings into an NVRAM configuration structure.
+    pub fn export_nvram_config(
+        &self,
+        base: Option<&crate::nvram::NvramConfig>,
+    ) -> crate::nvram::NvramConfig {
+        let mut cfg = base
+            .cloned()
+            .unwrap_or_else(crate::nvram::NvramConfig::default_board);
+        cfg.ip = self.net.current_ip();
+        cfg.subnet = self.net.subnet_mask();
+        cfg.gateway = self.net.gateway();
+        cfg.mac = self.net.config().mac_address;
+        cfg.local_port = self.config.local_port;
+        cfg.remote_port = self.config.remote_port;
+        cfg.command_port = self.config.command_port;
+        cfg.acc_interval = self.config.acc_interval;
+        cfg.led_interval = self.config.led_interval;
+        cfg.temp_interval = self.config.temp_interval;
+        cfg.pressure_interval = self.config.pressure_interval;
+        cfg.file_sync_interval = self.config.file_sync_interval;
+        cfg.default_power_mask = self.power_mask;
+        cfg
+    }
+
+    /// Formatted configuration summary string for remote inspection.
+    pub fn config_summary(&self) -> alloc::string::String {
+        let ip = self.net.current_ip();
+        let sub = self.net.subnet_mask();
+        let gw = self.net.gateway();
+        let mac = self.net.config().mac_address;
+        alloc::format!(
+            "CONFIG ip={}.{}.{}.{} sub={}.{}.{}.{} gw={}.{}.{}.{} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} acc={} led={} temp={} press={} sync={} pwr=0x{:02X}",
+            ip[0], ip[1], ip[2], ip[3],
+            sub[0], sub[1], sub[2], sub[3],
+            gw[0], gw[1], gw[2], gw[3],
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            self.config.acc_interval,
+            self.config.led_interval,
+            self.config.temp_interval,
+            self.config.pressure_interval,
+            self.config.file_sync_interval,
+            self.power_mask
+        )
     }
 
     /// Start application services (initiates DHCP if enabled and opens SD card log with RTC banner).
@@ -474,6 +600,34 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
             }
             fn sync_storage(&mut self) -> Result<(), crate::hal::HalError> {
                 self.app.logger.sync()
+            }
+            fn power_mask(&self) -> u8 {
+                self.app.power_mask()
+            }
+            fn set_power_domain(
+                &mut self,
+                domain: crate::power::PowerDomain,
+                on: bool,
+            ) -> Result<(), crate::hal::HalError> {
+                self.app.set_power_domain(domain, on);
+                Ok(())
+            }
+            fn set_all_power(&mut self, on: bool) -> Result<(), crate::hal::HalError> {
+                self.app.set_all_power(on);
+                Ok(())
+            }
+            fn config_string(&self) -> Option<alloc::string::String> {
+                Some(self.app.config_summary())
+            }
+            fn request_reboot(&mut self) {
+                self.app.request_reboot();
+            }
+            fn link_status_string(&self) -> Option<alloc::string::String> {
+                Some(if self.app.phy_link_up() {
+                    alloc::string::String::from("UP")
+                } else {
+                    alloc::string::String::from("DOWN")
+                })
             }
         }
 
@@ -900,5 +1054,50 @@ mod tests {
         let reply_frame = &tx[0];
         let reply_view = crate::udp::parse_frame(reply_frame).unwrap();
         assert_eq!(reply_view.payload, b"PONG\r\n");
+    }
+
+    #[test]
+    fn remote_power_and_config_commands() {
+        let (mut app, _eth, _sink) = test_app();
+        let rtc = sample_rtc();
+
+        // 1. Initial power state
+        assert_eq!(app.power_mask(), crate::power::DEFAULT_BOARD_POWER_MASK);
+
+        // 2. Execute POWER GPS OFF
+        let cmd = crate::commands::Command::PowerSet(crate::power::PowerDomain::Gps, false);
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert_eq!(res, "OK POWER Gps OFF");
+        assert_eq!(app.power_mask() & crate::power::GPS_ON_MASK, 0);
+
+        // 3. Execute POWER ALL ON
+        let cmd = crate::commands::Command::PowerAll(true);
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert_eq!(res, "OK POWER ALL ON");
+        assert_eq!(app.power_mask(), 0xFF);
+
+        // 4. Execute CONFIG GET
+        let cmd = crate::commands::Command::ConfigGet;
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert!(res.starts_with("CONFIG ip=192.168.2.101"));
+
+        // 5. Execute REBOOT
+        assert!(!app.is_reboot_requested());
+        let cmd = crate::commands::Command::Reboot;
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert_eq!(res, "OK REBOOTING");
+        assert!(app.is_reboot_requested());
+
+        // 6. Test NVRAM import & export
+        let mut nvram = crate::nvram::NvramConfig::default_board();
+        nvram.ip = [10, 0, 0, 99];
+        nvram.acc_interval = 2500;
+        app.apply_nvram_config(&nvram);
+        assert_eq!(app.net().current_ip(), [10, 0, 0, 99]);
+        assert_eq!(app.config.acc_interval, 2500);
+
+        let exported = app.export_nvram_config(None);
+        assert_eq!(exported.ip, [10, 0, 0, 99]);
+        assert_eq!(exported.acc_interval, 2500);
     }
 }

@@ -42,6 +42,29 @@ impl PowerDomain {
     pub const fn mask(self) -> u8 {
         1 << (self as u8)
     }
+
+    /// Parse power domain from name (case-insensitive).
+    pub fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("ACC1") {
+            Some(PowerDomain::Acc1)
+        } else if name.eq_ignore_ascii_case("ACC2") {
+            Some(PowerDomain::Acc2)
+        } else if name.eq_ignore_ascii_case("PRESSURE") || name.eq_ignore_ascii_case("BARO") {
+            Some(PowerDomain::Pressure)
+        } else if name.eq_ignore_ascii_case("TEMP") {
+            Some(PowerDomain::Temp)
+        } else if name.eq_ignore_ascii_case("EXT_TEMP") || name.eq_ignore_ascii_case("EXTTEMP") {
+            Some(PowerDomain::ExtTemp)
+        } else if name.eq_ignore_ascii_case("GPS") {
+            Some(PowerDomain::Gps)
+        } else if name.eq_ignore_ascii_case("SD") || name.eq_ignore_ascii_case("SD3V3") {
+            Some(PowerDomain::Sd3V3)
+        } else if name.eq_ignore_ascii_case("COMPASS") {
+            Some(PowerDomain::Compass)
+        } else {
+            None
+        }
+    }
 }
 
 pub const ACC1_ON_MASK: u8 = 1 << 0;

@@ -23,6 +23,20 @@ pub enum Command {
     EthStop,
     /// Force synchronization/flush of the SD card log buffer (`SYNC`).
     Sync,
+    /// Query peripheral power rail state (`POWER` or `POWER STATUS`).
+    PowerStatus,
+    /// Toggle specific power domain (`POWER <DOMAIN> <ON|OFF>`).
+    PowerSet(crate::power::PowerDomain, bool),
+    /// Turn all peripheral power domains on or off (`POWER ALL <ON|OFF>`).
+    PowerAll(bool),
+    /// Query persistent NVRAM configuration (`CONFIG` or `CONFIG GET`).
+    ConfigGet,
+    /// Reset persistent NVRAM configuration to board defaults (`CONFIG RESET`).
+    ConfigReset,
+    /// Save current configuration into persistent NVRAM (`CONFIG SAVE`).
+    ConfigSave,
+    /// Request software system reset / reboot (`REBOOT`).
+    Reboot,
     /// Query available commands (`HELP` or `?`).
     Help,
     /// Unknown or unrecognised command payload.
@@ -39,10 +53,11 @@ impl Command {
             return Command::Unknown(String::new());
         }
 
-        // Split into up to two tokens (e.g. "LOG" and "START")
+        // Split into tokens (e.g. "POWER" "GPS" "ON")
         let mut tokens = trimmed.split_whitespace();
         let first = tokens.next().unwrap_or("");
         let second = tokens.next().unwrap_or("");
+        let third = tokens.next().unwrap_or("");
 
         if first.eq_ignore_ascii_case("PING") {
             Command::Ping
@@ -50,6 +65,10 @@ impl Command {
             Command::Status
         } else if first.eq_ignore_ascii_case("SYNC") {
             Command::Sync
+        } else if first.eq_ignore_ascii_case("REBOOT")
+            || (first.eq_ignore_ascii_case("RESET") && second.is_empty())
+        {
+            Command::Reboot
         } else if first.eq_ignore_ascii_case("HELP") || first == "?" {
             Command::Help
         } else if first.eq_ignore_ascii_case("LOG") {
@@ -65,6 +84,45 @@ impl Command {
                 Command::EthStart
             } else if second.eq_ignore_ascii_case("STOP") || second.eq_ignore_ascii_case("OFF") {
                 Command::EthStop
+            } else {
+                Command::Unknown(trimmed.into())
+            }
+        } else if first.eq_ignore_ascii_case("POWER") {
+            if second.is_empty()
+                || second.eq_ignore_ascii_case("STATUS")
+                || second.eq_ignore_ascii_case("GET")
+            {
+                Command::PowerStatus
+            } else if second.eq_ignore_ascii_case("ALL") {
+                if third.eq_ignore_ascii_case("ON") || third.eq_ignore_ascii_case("1") {
+                    Command::PowerAll(true)
+                } else if third.eq_ignore_ascii_case("OFF") || third.eq_ignore_ascii_case("0") {
+                    Command::PowerAll(false)
+                } else {
+                    Command::Unknown(trimmed.into())
+                }
+            } else if let Some(domain) = crate::power::PowerDomain::from_name(second) {
+                if third.eq_ignore_ascii_case("ON") || third.eq_ignore_ascii_case("1") {
+                    Command::PowerSet(domain, true)
+                } else if third.eq_ignore_ascii_case("OFF") || third.eq_ignore_ascii_case("0") {
+                    Command::PowerSet(domain, false)
+                } else {
+                    Command::Unknown(trimmed.into())
+                }
+            } else {
+                Command::Unknown(trimmed.into())
+            }
+        } else if first.eq_ignore_ascii_case("CONFIG") {
+            if second.is_empty()
+                || second.eq_ignore_ascii_case("GET")
+                || second.eq_ignore_ascii_case("STATUS")
+            {
+                Command::ConfigGet
+            } else if second.eq_ignore_ascii_case("RESET") || second.eq_ignore_ascii_case("DEFAULT")
+            {
+                Command::ConfigReset
+            } else if second.eq_ignore_ascii_case("SAVE") || second.eq_ignore_ascii_case("WRITE") {
+                Command::ConfigSave
             } else {
                 Command::Unknown(trimmed.into())
             }
@@ -94,6 +152,48 @@ pub trait CommandHandler {
 
     /// Force flushing SD card file buffers.
     fn sync_storage(&mut self) -> Result<(), crate::hal::HalError>;
+
+    /// Query the current 8-bit power rail bitmask.
+    fn power_mask(&self) -> u8 {
+        crate::power::DEFAULT_BOARD_POWER_MASK
+    }
+
+    /// Set an individual peripheral power rail state.
+    fn set_power_domain(
+        &mut self,
+        _domain: crate::power::PowerDomain,
+        _on: bool,
+    ) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Set all peripheral power rails on or off.
+    fn set_all_power(&mut self, _on: bool) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Formatted NVRAM configuration string.
+    fn config_string(&self) -> Option<String> {
+        None
+    }
+
+    /// Reset NVRAM configuration back to factory board defaults.
+    fn reset_config(&mut self) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Save current active settings to persistent NVRAM.
+    fn save_config(&mut self) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Request a device software reboot.
+    fn request_reboot(&mut self) {}
+
+    /// Formatted physical PHY link status (e.g. `UP 100M/FD` or `DOWN`).
+    fn link_status_string(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Execute a [`Command`] against a [`CommandHandler`], returning the formatted reply string.
@@ -111,9 +211,13 @@ pub fn execute_command<H: CommandHandler>(cmd: &Command, handler: &mut H) -> Str
             let rtc = handler
                 .rtc_string()
                 .unwrap_or_else(|| String::from("UNKNOWN"));
+            let link = handler
+                .link_status_string()
+                .map(|l| format!(" link={}", l))
+                .unwrap_or_default();
             format!(
-                "STATUS sd={} eth={} ip={}.{}.{}.{} rtc={}",
-                sd_str, eth_str, ip[0], ip[1], ip[2], ip[3], rtc
+                "STATUS sd={} eth={} ip={}.{}.{}.{} rtc={}{}",
+                sd_str, eth_str, ip[0], ip[1], ip[2], ip[3], rtc, link
             )
         }
         Command::LogStart => {
@@ -136,9 +240,48 @@ pub fn execute_command<H: CommandHandler>(cmd: &Command, handler: &mut H) -> Str
             Ok(()) => String::from("OK SYNCED"),
             Err(_) => String::from("ERR SYNC FAILED"),
         },
-        Command::Help => {
-            String::from("COMMANDS: PING, STATUS, LOG <ON|OFF>, ETH <ON|OFF>, SYNC, HELP")
+        Command::PowerStatus => {
+            let mask = handler.power_mask();
+            format!(
+                "POWER mask=0x{:02X} gps={} compass={} acc1={} acc2={} temp={} ext_temp={} press={} sd={}",
+                mask,
+                if (mask & crate::power::GPS_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::COMPASS_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::ACC1_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::ACC2_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::TEMP_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::EXT_TEMP_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::PRESSURE_ON_MASK) != 0 { "ON" } else { "OFF" },
+                if (mask & crate::power::SD_3V3_ON_MASK) != 0 { "ON" } else { "OFF" },
+            )
         }
+        Command::PowerSet(domain, on) => match handler.set_power_domain(*domain, *on) {
+            Ok(()) => format!("OK POWER {:?} {}", domain, if *on { "ON" } else { "OFF" }),
+            Err(_) => String::from("ERR POWER SET FAILED"),
+        },
+        Command::PowerAll(on) => match handler.set_all_power(*on) {
+            Ok(()) => format!("OK POWER ALL {}", if *on { "ON" } else { "OFF" }),
+            Err(_) => String::from("ERR POWER SET FAILED"),
+        },
+        Command::ConfigGet => match handler.config_string() {
+            Some(s) => s,
+            None => String::from("ERR CONFIG NOT AVAILABLE"),
+        },
+        Command::ConfigReset => match handler.reset_config() {
+            Ok(()) => String::from("OK CONFIG RESET TO DEFAULTS"),
+            Err(_) => String::from("ERR CONFIG RESET FAILED"),
+        },
+        Command::ConfigSave => match handler.save_config() {
+            Ok(()) => String::from("OK CONFIG SAVED"),
+            Err(_) => String::from("ERR CONFIG SAVE FAILED"),
+        },
+        Command::Reboot => {
+            handler.request_reboot();
+            String::from("OK REBOOTING")
+        }
+        Command::Help => String::from(
+            "COMMANDS: PING, STATUS, LOG <ON|OFF>, ETH <ON|OFF>, SYNC, POWER <STATUS|ALL <ON|OFF>|<DOMAIN> <ON|OFF>>, CONFIG <GET|RESET|SAVE>, REBOOT, HELP",
+        ),
         Command::Unknown(raw) => format!("ERR UNKNOWN COMMAND: {}", raw),
     }
 }
@@ -291,5 +434,121 @@ mod tests {
         let mut h = MockHandler::default();
         let cmd = Command::parse("FOOBAR");
         assert_eq!(execute_command(&cmd, &mut h), "ERR UNKNOWN COMMAND: FOOBAR");
+    }
+
+    #[test]
+    fn parse_power_and_config_and_reboot() {
+        assert_eq!(Command::parse("POWER"), Command::PowerStatus);
+        assert_eq!(Command::parse("POWER STATUS"), Command::PowerStatus);
+        assert_eq!(Command::parse("power all on"), Command::PowerAll(true));
+        assert_eq!(Command::parse("POWER ALL OFF"), Command::PowerAll(false));
+        assert_eq!(
+            Command::parse("POWER GPS ON"),
+            Command::PowerSet(crate::power::PowerDomain::Gps, true)
+        );
+        assert_eq!(
+            Command::parse("POWER COMPASS OFF"),
+            Command::PowerSet(crate::power::PowerDomain::Compass, false)
+        );
+        assert_eq!(
+            Command::parse("POWER ACC1 1"),
+            Command::PowerSet(crate::power::PowerDomain::Acc1, true)
+        );
+
+        assert_eq!(Command::parse("CONFIG"), Command::ConfigGet);
+        assert_eq!(Command::parse("CONFIG GET"), Command::ConfigGet);
+        assert_eq!(Command::parse("CONFIG RESET"), Command::ConfigReset);
+        assert_eq!(Command::parse("CONFIG SAVE"), Command::ConfigSave);
+
+        assert_eq!(Command::parse("REBOOT"), Command::Reboot);
+        assert_eq!(Command::parse("RESET"), Command::Reboot);
+    }
+
+    #[test]
+    fn execute_power_and_config() {
+        struct PowerMock {
+            base: MockHandler,
+            mask: u8,
+            reboot_called: bool,
+        }
+        impl CommandHandler for PowerMock {
+            fn is_sd_enabled(&self) -> bool {
+                self.base.is_sd_enabled()
+            }
+            fn set_sd_enabled(&mut self, enabled: bool) {
+                self.base.set_sd_enabled(enabled)
+            }
+            fn is_eth_enabled(&self) -> bool {
+                self.base.is_eth_enabled()
+            }
+            fn set_eth_enabled(&mut self, enabled: bool) {
+                self.base.set_eth_enabled(enabled)
+            }
+            fn current_ip(&self) -> [u8; 4] {
+                self.base.current_ip()
+            }
+            fn rtc_string(&self) -> Option<String> {
+                self.base.rtc_string()
+            }
+            fn sync_storage(&mut self) -> Result<(), HalError> {
+                self.base.sync_storage()
+            }
+            fn power_mask(&self) -> u8 {
+                self.mask
+            }
+            fn set_power_domain(
+                &mut self,
+                domain: crate::power::PowerDomain,
+                on: bool,
+            ) -> Result<(), HalError> {
+                if on {
+                    self.mask |= domain.mask();
+                } else {
+                    self.mask &= !domain.mask();
+                }
+                Ok(())
+            }
+            fn set_all_power(&mut self, on: bool) -> Result<(), HalError> {
+                self.mask = if on { 0xFF } else { 0x00 };
+                Ok(())
+            }
+            fn config_string(&self) -> Option<String> {
+                Some(String::from("CONFIG ip=192.168.2.101"))
+            }
+            fn request_reboot(&mut self) {
+                self.reboot_called = true;
+            }
+        }
+
+        let mut h = PowerMock {
+            base: MockHandler::default(),
+            mask: crate::power::DEFAULT_BOARD_POWER_MASK,
+            reboot_called: false,
+        };
+
+        let status = execute_command(&Command::PowerStatus, &mut h);
+        assert!(status.contains("gps=ON"));
+        assert!(status.contains("acc1=OFF"));
+
+        let res = execute_command(
+            &Command::PowerSet(crate::power::PowerDomain::Acc1, true),
+            &mut h,
+        );
+        assert_eq!(res, "OK POWER Acc1 ON");
+        assert_eq!(
+            h.mask & crate::power::ACC1_ON_MASK,
+            crate::power::ACC1_ON_MASK
+        );
+
+        let res = execute_command(&Command::PowerAll(false), &mut h);
+        assert_eq!(res, "OK POWER ALL OFF");
+        assert_eq!(h.mask, 0x00);
+
+        let cfg = execute_command(&Command::ConfigGet, &mut h);
+        assert_eq!(cfg, "CONFIG ip=192.168.2.101");
+
+        let reboot = execute_command(&Command::Reboot, &mut h);
+        assert_eq!(reboot, "OK REBOOTING");
+        assert!(h.reboot_called);
     }
 }
