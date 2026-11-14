@@ -43,6 +43,8 @@ pub mod lpc17xx;
 pub mod net;
 pub mod net_stack;
 pub mod nmea;
+pub mod nvram;
+pub mod phy;
 pub mod power;
 pub mod pressure;
 pub mod rtc;
