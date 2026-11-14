@@ -7,9 +7,17 @@
 //! bug-prone part, so we port it as a pure function over a calibration struct
 //! and verify it numerically.
 
+use crate::hal::{HalError, HalResult, I2c};
+
+/// 7-bit I2C address for the MS5534 calibration EEPROM (`0xA1 >> 1`).
+pub const MS5534_EEPROM_ADDR: u8 = 0xA1 >> 1;
+
+/// 7-bit I2C address for the MS5534 ADC (`0xEE >> 1`).
+pub const MS5534_ADC_ADDR: u8 = 0xEE >> 1;
+
 /// Factory calibration words `c1..c7` plus the extra `a,b,c,d` coefficients the
 /// firmware reads from the device EEPROM.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PressureCalibration {
     pub c1: u16,
     pub c2: u16,
@@ -25,11 +33,11 @@ pub struct PressureCalibration {
 }
 
 /// Result of a conversion.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PressureReading {
     /// Temperature in tenths of a degree (as produced by the C formula).
     pub temperature: f32,
-    /// Pressure in the sensor's native units.
+    /// Pressure in the sensor's native units (tenths of mbar).
     pub pressure: f32,
 }
 
@@ -62,6 +70,108 @@ pub fn convert(cal: &PressureCalibration, pr: u16, tm: u16) -> PressureReading {
     }
 }
 
+/// Read calibration words from MS5534 EEPROM via I2C matching `higro.c`.
+pub fn read_calibration<I: I2c>(i2c: &mut I) -> HalResult<PressureCalibration> {
+    let mut words = [0u8; 14];
+    i2c.read(MS5534_EEPROM_ADDR, &mut words)
+        .map_err(|_| HalError::Bus)?;
+
+    let c1 = u16::from_be_bytes([words[0], words[1]]);
+    let c2 = u16::from_be_bytes([words[2], words[3]]);
+    let c3 = u16::from_be_bytes([words[4], words[5]]);
+    let c4 = u16::from_be_bytes([words[6], words[7]]);
+    let c5 = u16::from_be_bytes([words[8], words[9]]);
+    let c6 = u16::from_be_bytes([words[10], words[11]]);
+    let c7 = u16::from_be_bytes([words[12], words[13]]);
+
+    let mut read_coeff = |reg: u8| -> HalResult<u16> {
+        let mut buf = [0u8; 1];
+        i2c.write_read(MS5534_EEPROM_ADDR, &[reg], &mut buf)
+            .map_err(|_| HalError::Bus)?;
+        Ok(buf[0] as u16)
+    };
+
+    let a = read_coeff(30)?;
+    let b = read_coeff(31)?;
+    let c = read_coeff(32)?;
+    let d = read_coeff(33)?;
+
+    Ok(PressureCalibration {
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        a,
+        b,
+        c,
+        d,
+    })
+}
+
+/// Hardware driver for MS5534 pressure and temperature sensor communicating via I2C.
+pub struct PressureSensor<I: I2c> {
+    i2c: I,
+    cal: PressureCalibration,
+}
+
+impl<I: I2c> PressureSensor<I> {
+    /// Initialize sensor by reading factory calibration over I2C.
+    pub fn new(mut i2c: I) -> HalResult<Self> {
+        let cal = read_calibration(&mut i2c)?;
+        Ok(Self { i2c, cal })
+    }
+
+    /// Construct sensor with known/mocked calibration coefficients.
+    pub fn with_calibration(i2c: I, cal: PressureCalibration) -> Self {
+        Self { i2c, cal }
+    }
+
+    /// Access calibration coefficients.
+    pub fn calibration(&self) -> &PressureCalibration {
+        &self.cal
+    }
+
+    /// Start pressure ADC conversion and read the 16-bit raw ADC code.
+    pub fn read_raw_pressure(&mut self) -> HalResult<u16> {
+        // Start pressure conversion: write [0xFF, 0xF0] to ADC
+        self.i2c
+            .write(MS5534_ADC_ADDR, &[0xFF, 0xF0])
+            .map_err(|_| HalError::Bus)?;
+
+        // Read ADC: write [0xFD], then read 2 bytes big-endian
+        let mut buf = [0u8; 2];
+        self.i2c
+            .write_read(MS5534_ADC_ADDR, &[0xFD], &mut buf)
+            .map_err(|_| HalError::Bus)?;
+        Ok(u16::from_be_bytes(buf))
+    }
+
+    /// Start temperature ADC conversion and read the 16-bit raw ADC code.
+    pub fn read_raw_temperature(&mut self) -> HalResult<u16> {
+        // Start temp conversion: write [0xFF, 0xD0] to ADC
+        self.i2c
+            .write(MS5534_ADC_ADDR, &[0xFF, 0xD0])
+            .map_err(|_| HalError::Bus)?;
+
+        // Read ADC: write [0xFD], then read 2 bytes big-endian
+        let mut buf = [0u8; 2];
+        self.i2c
+            .write_read(MS5534_ADC_ADDR, &[0xFD], &mut buf)
+            .map_err(|_| HalError::Bus)?;
+        Ok(u16::from_be_bytes(buf))
+    }
+
+    /// Perform a full measurement cycle: read raw pressure and temperature, then convert.
+    pub fn read(&mut self) -> HalResult<PressureReading> {
+        let pr = self.read_raw_pressure()?;
+        let tm = self.read_raw_temperature()?;
+        Ok(convert(&self.cal, pr, tm))
+    }
+}
+
 /// Sequencer matching the C `TIMER1_IRQHandler` state machine that alternates
 /// between starting/reading pressure and temperature conversions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,8 +188,8 @@ impl PressureStep {
         match self {
             PressureStep::StartPressure => PressureStep::ReadPressure,
             PressureStep::ReadPressure => PressureStep::StartTemperature,
-            PressureStep::StartTemperature => PressureStep::ReadTemperature,
             PressureStep::ReadTemperature => PressureStep::StartPressure,
+            PressureStep::StartTemperature => PressureStep::ReadTemperature,
         }
     }
 }
@@ -87,6 +197,7 @@ impl PressureStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction as Tx};
 
     /// Representative MS5534 calibration set.
     fn sample_cal() -> PressureCalibration {
@@ -143,5 +254,51 @@ mod tests {
         assert_eq!(s, PressureStep::ReadTemperature);
         s = s.next();
         assert_eq!(s, PressureStep::StartPressure);
+    }
+
+    #[test]
+    fn pressure_sensor_read_cal_and_read_data() {
+        let cal_bytes: [u8; 14] = [
+            (24000u16 >> 8) as u8,
+            24000u16 as u8, // c1
+            (4000u16 >> 8) as u8,
+            4000u16 as u8, // c2
+            (350u16 >> 8) as u8,
+            350u16 as u8, // c3
+            (400u16 >> 8) as u8,
+            400u16 as u8, // c4
+            (7000u16 >> 8) as u8,
+            7000u16 as u8, // c5
+            (4500u16 >> 8) as u8,
+            4500u16 as u8, // c6
+            (2500u16 >> 8) as u8,
+            2500u16 as u8, // c7
+        ];
+
+        let expectations = [
+            Tx::read(MS5534_EEPROM_ADDR, cal_bytes.to_vec()),
+            Tx::write_read(MS5534_EEPROM_ADDR, vec![30], vec![100]), // a
+            Tx::write_read(MS5534_EEPROM_ADDR, vec![31], vec![110]), // b
+            Tx::write_read(MS5534_EEPROM_ADDR, vec![32], vec![8]),   // c
+            Tx::write_read(MS5534_EEPROM_ADDR, vec![33], vec![8]),   // d
+            // Raw pressure read
+            Tx::write(MS5534_ADC_ADDR, vec![0xFF, 0xF0]),
+            Tx::write_read(MS5534_ADC_ADDR, vec![0xFD], vec![0x23, 0x28]), // 9000
+            // Raw temp read
+            Tx::write(MS5534_ADC_ADDR, vec![0xFF, 0xD0]),
+            Tx::write_read(MS5534_ADC_ADDR, vec![0xFD], vec![0x1C, 0x20]), // 7200
+        ];
+
+        let mut i2c = I2cMock::new(&expectations);
+        let mut sensor = PressureSensor::new(i2c.clone()).unwrap();
+
+        assert_eq!(sensor.calibration().c1, 24000);
+        assert_eq!(sensor.calibration().a, 100);
+
+        let reading = sensor.read().unwrap();
+        assert!(reading.pressure.is_finite());
+        assert!(reading.temperature.is_finite());
+
+        i2c.done();
     }
 }

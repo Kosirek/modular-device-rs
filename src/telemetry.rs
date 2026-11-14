@@ -2,7 +2,7 @@
 //!
 //! Port of the telemetry formatting and logging loops from `mainPrg.c`.
 //! Handles formatting sensor readings (accelerometer, electronic compass,
-//! GPS time/coordinates, temperature/voltage) into standard strings for:
+//! GPS time/coordinates, temperature/voltage, barometric pressure) into standard strings for:
 //! 1. Appending to the SD card `data.log` file via [`DataLogger`].
 //! 2. Transmitting as UDP broadcast payloads via [`crate::net_stack::NetworkStack`].
 
@@ -10,6 +10,7 @@ use crate::accelerometer::AccSample;
 use crate::compass::Orientation;
 use crate::gps::GpsData;
 use crate::hal::{HalResult, LogSink};
+use crate::pressure::PressureReading;
 use crate::rtc::TimeStruct;
 
 #[cfg(not(test))]
@@ -54,6 +55,15 @@ pub fn format_temperature(temp: &[f32; 3], power_volt: f32) -> String {
     )
 }
 
+/// Format barometric pressure and temperature reading:
+/// `"Pressure-<pressure>,<temperature>*"`.
+pub fn format_pressure(reading: &PressureReading) -> String {
+    format!(
+        "Pressure-{:.1},{:.1}*",
+        reading.pressure, reading.temperature
+    )
+}
+
 /// Format RTC date and time prefix matching `mainPrg.c`:
 /// `"YYYY-MM-DD HH:MM:SS  "`.
 pub fn format_rtc_timestamp(rtc: &TimeStruct) -> String {
@@ -74,6 +84,8 @@ pub enum TelemetryRecord {
     Gps(GpsData),
     /// Temperatures and supply voltage.
     Temperature { temp: [f32; 3], power_volt: f32 },
+    /// Barometric pressure and sensor temperature.
+    Pressure(PressureReading),
     /// Custom / arbitrary telemetry string.
     Custom(String),
 }
@@ -86,6 +98,7 @@ impl TelemetryRecord {
             Self::Compass(comp) => format_compass(comp),
             Self::Gps(gps) => format_gps(gps),
             Self::Temperature { temp, power_volt } => format_temperature(temp, *power_volt),
+            Self::Pressure(p) => format_pressure(p),
             Self::Custom(msg) => msg.clone(),
         }
     }
@@ -306,6 +319,15 @@ mod tests {
             format_temperature(&temp, pwr),
             "Temperature-21.5,22.0,23.5,12.4*"
         );
+    }
+
+    #[test]
+    fn format_pressure_matches_convention() {
+        let p = PressureReading {
+            pressure: 1013.2,
+            temperature: 24.5,
+        };
+        assert_eq!(format_pressure(&p), "Pressure-1013.2,24.5*");
     }
 
     #[test]
