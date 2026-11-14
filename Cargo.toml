@@ -32,7 +32,7 @@ default = ["std"]
 # itself is `no_std` (+ `alloc`) whenever it is not compiled for tests.
 std = []
 # Enable the bare-metal firmware binary (requires thumbv7m-none-eabi target).
-firmware = ["dep:cortex-m", "dep:cortex-m-rt", "dep:panic-halt", "dep:embedded-alloc"]
+firmware = ["dep:cortex-m", "dep:cortex-m-rt", "dep:embedded-alloc"]
 
 [dependencies]
 # Standard embedded-rust HAL traits. Drivers are written against these so the

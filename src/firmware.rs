@@ -10,7 +10,6 @@ extern crate alloc;
 
 use cortex_m_rt::entry;
 use embedded_alloc::LlffHeap as Heap;
-use panic_halt as _;
 
 use um_rust::app::{App, AppConfig, SensorInputs};
 use um_rust::hal::{EthernetConfig, HalResult, LogSink, MonotonicClock};
@@ -33,6 +32,30 @@ impl LogSink for FirmwareLogSink {
     }
     fn flush(&mut self) -> HalResult<()> {
         Ok(())
+    }
+}
+
+/// Advanced panic handler for LPC1768 bare-metal runtime.
+///
+/// Illuminates fatal fault indicator LEDs (LED3 and LED4), disables interrupts,
+/// and halts the core in a low-power WFI loop.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    // 1. Immediately drive LEDs: LED3 and LED4 high to signal fatal fault / HardFault
+    unsafe {
+        use um_rust::leds::LedDriver;
+        let mut leds = um_rust::lpc17xx::Lpc17xxLedDriver::hardware();
+        leds.init_pins();
+        let _ = leds.set_led(Led::Led3, true); // LED3 on P4.28
+        let _ = leds.set_led(Led::Led4, true); // LED4 on P4.29
+    }
+
+    // 2. Disable interrupts to prevent nested exception handling
+    cortex_m::interrupt::disable();
+
+    // 3. Halt processor in low-power WFI state with LED indicator active
+    loop {
+        cortex_m::asm::wfi();
     }
 }
 
@@ -72,6 +95,12 @@ fn main() -> ! {
     loop {
         let now_ticks = periph.timer.now_us();
         app.step(now_ticks, SensorInputs::default()).ok();
+
+        // Check if remote UDP command requested a reboot
+        if app.is_reboot_requested() {
+            cortex_m::peripheral::SCB::sys_reset();
+        }
+
         cortex_m::asm::wfi();
     }
 }
