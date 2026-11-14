@@ -537,6 +537,50 @@ impl EthernetDevice for Lpc17xxEmac {
     }
 }
 
+impl crate::phy::MiiBus for Lpc17xxEmac {
+    fn read_phy(&mut self, phy_addr: u8, reg_addr: u8) -> HalResult<u16> {
+        unsafe {
+            write_volatile(
+                &mut (*self.raw).madr,
+                ((phy_addr as u32 & 0x1F) << 8) | (reg_addr as u32 & 0x1F),
+            );
+            write_volatile(&mut (*self.raw).mcmd, 1);
+
+            let mut timeout = 100_000;
+            while (read_volatile(&(*self.raw).mind) & 1) != 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    write_volatile(&mut (*self.raw).mcmd, 0);
+                    return Err(HalError::Timeout);
+                }
+            }
+
+            write_volatile(&mut (*self.raw).mcmd, 0);
+            let val = read_volatile(&(*self.raw).mrdd);
+            Ok((val & 0xFFFF) as u16)
+        }
+    }
+
+    fn write_phy(&mut self, phy_addr: u8, reg_addr: u8, value: u16) -> HalResult<()> {
+        unsafe {
+            write_volatile(
+                &mut (*self.raw).madr,
+                ((phy_addr as u32 & 0x1F) << 8) | (reg_addr as u32 & 0x1F),
+            );
+            write_volatile(&mut (*self.raw).mwtd, value as u32);
+
+            let mut timeout = 100_000;
+            while (read_volatile(&(*self.raw).mind) & 1) != 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    return Err(HalError::Timeout);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Unified LPC1768 peripherals container.
 pub struct Lpc17xxPeripherals {
     pub power_port: Lpc17xxPowerPort,
@@ -775,5 +819,53 @@ mod tests {
         assert_eq!(block.rx_consume_index, 1);
 
         assert_eq!(emac.receive(&mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn emac_mii_read_and_write() {
+        use crate::phy::MiiBus;
+
+        let mut block = EmacBlock {
+            mac1: 0,
+            mac2: 0,
+            ipgt: 0,
+            ipgr: 0,
+            clrt: 0,
+            maxf: 0,
+            supp: 0,
+            test: 0,
+            mcfg: 0,
+            mcmd: 0,
+            madr: 0,
+            mwtd: 0,
+            mrdd: 0x5C90,
+            mind: 0, // Not busy
+            _pad0: [0; 2],
+            command: 0,
+            status: 0,
+            rx_descriptor: 0,
+            rx_status: 0,
+            rx_descriptor_number: 0,
+            rx_produce_index: 0,
+            rx_consume_index: 0,
+            tx_descriptor: 0,
+            tx_status: 0,
+            tx_descriptor_number: 0,
+            tx_produce_index: 0,
+            tx_consume_index: 0,
+        };
+
+        let mut emac = unsafe { Lpc17xxEmac::from_raw(&mut block) };
+
+        // Test read
+        let val = emac.read_phy(1, 0x03).unwrap();
+        assert_eq!(val, 0x5C90);
+        assert_eq!(block.madr, (1 << 8) | 0x03);
+        assert_eq!(block.mcmd, 0); // read cleared
+
+        // Test write
+        emac.write_phy(1, 0x00, 0x1200).unwrap();
+        assert_eq!(block.madr, 1 << 8);
+        assert_eq!(block.mwtd, 0x1200);
     }
 }
