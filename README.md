@@ -36,17 +36,21 @@ tested off-target. This port applies a few principles:
 | `arp.c`             | `arp`                  | request/reply state machine                      |
 | `dhcp.c`            | `dhcp`                 | DISCOVER→OFFER→REQUEST→ACK, option TLV parsin    |
 | `mainPrg.c ENET_IRQ`| `net_stack`            | packet dispatching (ARP auto-reply, DHCP client, UDP routing) |
-| `mainPrg.c logging` | `telemetry`            | sensor formatting (`DATA.LOG`), batched SD logging, sync |
+| `mainPrg.c logging` | `telemetry`            | sensor formatting (`DATA.LOG`), pressure record, batched SD logging, sync |
 | `mainPrg.c main()`  | `app`                  | super-loop scheduling, SW1..SW5 keys, telemetry dispatch |
 | `25lc1024.c`        | `eeprom`               | SPI command/address sequencing (`embedded-hal` SpiDevice) |
 | `akcelerometr.c`    | `accelerometer`        | signed-axis conversion (`embedded-hal` SpiDevice)|
 | `kompas.c`          | `compass`              | heading/pitch/roll decode (`embedded-hal` I2c)   |
 | `termometr.c`       | `temperature`          | 12-bit scale + IIR filter (mocked ADC)           |
-| `higro.c`           | `pressure`             | MS5534 calibration polynomial + step sequencer   |
+| `higro.c`           | `pressure`             | MS5534 calibration polynomial + step sequencer + I2C EEPROM/ADC driver |
+| `dev_conf.h` rails  | `power`                | Peripheral power domain rails (GPIO2 pins 0..7) matching `mainPrg.c` |
+| `dev_conf.h` + LEDs | `leds`                 | 4 status LEDs & `led_sig` burst patterns (`embedded-hal` delay) |
 | `mainPrg.c get_key` | `keys`                 | switch bitmask combining (`embedded-hal` InputPin) |
 | `wtd.c`             | `watchdog`             | WDTC reload maths + feed sequence                |
 | `logs.c`            | `logs`                 | timestamped line formatting (in-memory sink)     |
 | `mmcbb.c` + `ff.c`  | `storage`              | SD+FAT via `embedded-sdmmc`; append/read `DEBUG.LOG` (RAM disk) |
+| `mainPrg.c UDP rx`  | `commands`             | Remote control UDP command parser (PING, STATUS, LOG, ETH, SYNC, HELP) |
+| `LPC17xx registers` | `lpc17xx`              | PAC MMIO register adapters (`Lpc17xxPin`, `PowerPort`, `LedDriver`, `WatchdogFeed`, `RtcRegisters`, `MonotonicClock`, `Emac`) |
 
 ## Try it
 

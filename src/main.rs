@@ -12,8 +12,10 @@ use um_rust::compass::Orientation;
 use um_rust::dhcp::{DhcpAction, DhcpClient};
 use um_rust::gps::GpsReceiver;
 use um_rust::hal::{EthernetConfig, EthernetDevice, HalResult, LogSink};
+use um_rust::leds::{InMemoryLedDriver, Led, LedManager};
 use um_rust::net::chksum16;
 use um_rust::net_stack::NetworkStack;
+use um_rust::power::{InMemoryPowerPort, PowerDomain, PowerManager};
 use um_rust::pressure::{convert, PressureCalibration};
 use um_rust::rtc::TimeStruct;
 use um_rust::telemetry::DataLogger;
@@ -144,6 +146,21 @@ fn main() {
     let mut app = App::new(net_stack, logger, AppConfig::default());
     app.start(timer.now(), &now).expect("app start");
 
+    // --- Power Domains & LEDs ---
+    let pwr = PowerManager::with_default_board_power(InMemoryPowerPort::default()).unwrap();
+    println!(
+        "power: default mask 0x{:02X} (GPS={}, Compass={}, Acc1={}, Acc2={})",
+        pwr.current_mask(),
+        pwr.is_enabled(PowerDomain::Gps),
+        pwr.is_enabled(PowerDomain::Compass),
+        pwr.is_enabled(PowerDomain::Acc1),
+        pwr.is_enabled(PowerDomain::Acc2),
+    );
+
+    let mut leds = LedManager::new(InMemoryLedDriver::default());
+    leds.on(Led::Led2).unwrap();
+    println!("leds: LED2 (heartbeat) on = {}", leds.is_on(Led::Led2));
+
     let inputs = SensorInputs {
         keys: Some(0),
         acc: Some(AccSample {
@@ -157,14 +174,24 @@ fn main() {
             roll: 0.0,
         }),
         gps: Some(gps.data()),
+        pressure: Some(r),
         temp: Some(([21.5, 22.0, 23.5], 12.3)),
         rtc: Some(&now),
     };
     let report = app.step(50000, inputs).expect("app step");
     println!(
-        "app: step at 50000 ticks: acc={}, compass_gps={}, temp={}, sync={}",
-        report.acc_emitted, report.compass_gps_emitted, report.temp_emitted, report.file_synced
+        "app: step at 50000 ticks: acc={}, compass_gps={}, temp={}, pressure={}, sync={}",
+        report.acc_emitted,
+        report.compass_gps_emitted,
+        report.temp_emitted,
+        report.pressure_emitted,
+        report.file_synced
     );
+
+    // --- Remote Commands ---
+    let cmd = um_rust::commands::Command::parse("STATUS");
+    let reply = app.execute_remote_command(&cmd, Some(&now)).unwrap();
+    println!("commands: executed 'STATUS' -> {}", reply.trim_end());
 
     println!("== done ==");
 }

@@ -19,6 +19,8 @@ use alloc::vec::Vec;
 pub struct ReceivedUdpPacket {
     /// IPv4 address of the sender.
     pub src_ip: [u8; IPV4_ADDRESS_LENGTH],
+    /// Ethernet MAC address of the sender.
+    pub src_mac: [u8; MAC_ADDRESS_LENGTH],
     /// Source UDP port.
     pub src_port: u16,
     /// Destination UDP port.
@@ -223,8 +225,11 @@ impl<D: EthernetDevice> NetworkStack<D> {
 
                         if for_us_ip && for_us_mac {
                             let src_ip = [frame[26], frame[27], frame[28], frame[29]];
+                            let src_mac =
+                                [frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]];
                             self.incoming_udp.push(ReceivedUdpPacket {
                                 src_ip,
+                                src_mac,
                                 src_port: view.src_port,
                                 dest_port: view.dest_port,
                                 payload: view.payload.to_vec(),
@@ -319,6 +324,24 @@ impl<D: EthernetDevice> NetworkStack<D> {
             remote_ip: *remote_ip,
         };
         let frame = build_udp_frame(payload, local_port, remote_port, &ep).ok_or(HalError::Bus)?;
+        self.device.transmit(&frame)
+    }
+
+    /// Build and transmit a UDP frame in reply to a received packet, sending
+    /// directly to the sender's IP and MAC address.
+    pub fn send_udp_reply(
+        &mut self,
+        payload: &[u8],
+        to: &ReceivedUdpPacket,
+        local_port: u16,
+    ) -> HalResult<()> {
+        let ep = Endpoint {
+            local_mac: self.config.mac_address,
+            remote_mac: to.src_mac,
+            local_ip: self.current_ip,
+            remote_ip: to.src_ip,
+        };
+        let frame = build_udp_frame(payload, local_port, to.src_port, &ep).ok_or(HalError::Bus)?;
         self.device.transmit(&frame)
     }
 }

@@ -14,6 +14,7 @@ use crate::gps::GpsData;
 use crate::hal::{EthernetDevice, HalResult, LogSink, WatchdogFeed};
 use crate::keys::{KEY_SW1, KEY_SW2, KEY_SW3, KEY_SW4, KEY_SW5};
 use crate::net_stack::{NetworkStack, ReceivedUdpPacket};
+use crate::pressure::PressureReading;
 use crate::rtc::TimeStruct;
 use crate::telemetry::{DataLogger, TelemetryRecord};
 
@@ -28,6 +29,9 @@ pub const DEFAULT_LED_INTERVAL: u64 = 5000;
 
 /// Temperature and power voltage acquisition interval matching `TEMP_TIME` (3333 ticks = ~333 ms).
 pub const DEFAULT_TEMP_INTERVAL: u64 = 3333;
+
+/// Barometric pressure acquisition interval (5000 ticks = 500 ms).
+pub const DEFAULT_PRESSURE_INTERVAL: u64 = 5000;
 
 /// Keypad scanning interval matching `KEY_TIME` in `mainPgr.h` (300 ticks = 30 ms).
 pub const DEFAULT_KEY_INTERVAL: u64 = 300;
@@ -44,6 +48,9 @@ pub const DEFAULT_LOCAL_PORT: u16 = 22223;
 /// Default UDP remote destination port matching `mainPrg.c`.
 pub const DEFAULT_REMOTE_PORT: u16 = 22223;
 
+/// Default UDP port for receiving remote control commands.
+pub const DEFAULT_COMMAND_PORT: u16 = 22223;
+
 /// Configuration parameters for the application super-loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppConfig {
@@ -53,6 +60,8 @@ pub struct AppConfig {
     pub led_interval: u64,
     /// Interval between temperature readings (ticks).
     pub temp_interval: u64,
+    /// Interval between barometric pressure readings (ticks).
+    pub pressure_interval: u64,
     /// Interval between keypad scans (ticks).
     pub key_interval: u64,
     /// Interval between SD card file syncs and RTC timestamps (ticks).
@@ -63,6 +72,8 @@ pub struct AppConfig {
     pub local_port: u16,
     /// Remote destination UDP port for telemetry transmissions.
     pub remote_port: u16,
+    /// Local UDP port listening for remote control commands.
+    pub command_port: u16,
 }
 
 impl Default for AppConfig {
@@ -71,11 +82,13 @@ impl Default for AppConfig {
             acc_interval: DEFAULT_ACC_INTERVAL,
             led_interval: DEFAULT_LED_INTERVAL,
             temp_interval: DEFAULT_TEMP_INTERVAL,
+            pressure_interval: DEFAULT_PRESSURE_INTERVAL,
             key_interval: DEFAULT_KEY_INTERVAL,
             file_sync_interval: DEFAULT_FILE_SYNC_INTERVAL,
             link_interval: DEFAULT_LINK_INTERVAL,
             local_port: DEFAULT_LOCAL_PORT,
             remote_port: DEFAULT_REMOTE_PORT,
+            command_port: DEFAULT_COMMAND_PORT,
         }
     }
 }
@@ -97,6 +110,8 @@ pub struct AppState {
     pub led_deadline: u64,
     /// Next scheduled tick for temperature reading.
     pub temp_deadline: u64,
+    /// Next scheduled tick for barometric pressure reading.
+    pub pressure_deadline: u64,
     /// Next scheduled tick for keypad scan.
     pub key_deadline: u64,
     /// Next scheduled tick for SD card sync and timestamp emission.
@@ -114,6 +129,7 @@ impl AppState {
             acc_deadline: start_ticks + config.acc_interval,
             led_deadline: start_ticks + config.led_interval,
             temp_deadline: start_ticks + config.temp_interval,
+            pressure_deadline: start_ticks + config.pressure_interval,
             key_deadline: start_ticks + config.key_interval,
             file_sync_deadline: start_ticks + config.file_sync_interval,
         }
@@ -181,12 +197,16 @@ pub struct StepReport {
     pub compass_gps_emitted: bool,
     /// Temperature telemetry was formatted and dispatched.
     pub temp_emitted: bool,
+    /// Barometric pressure telemetry was formatted and dispatched.
+    pub pressure_emitted: bool,
     /// SD card sync and RTC timestamp were written.
     pub file_synced: bool,
     /// Watchdog timer was fed during this step.
     pub watchdog_fed: bool,
     /// Number of incoming UDP packets received from the network.
     pub received_packets: usize,
+    /// Number of remote control commands parsed and executed during this step.
+    pub commands_executed: usize,
 }
 
 /// Sensor inputs and peripheral readings passed into a super-loop step.
@@ -202,6 +222,8 @@ pub struct SensorInputs<'a> {
     pub gps: Option<&'a GpsData>,
     /// Latest 3-channel temperatures and supply voltage.
     pub temp: Option<([f32; 3], f32)>,
+    /// Latest barometric pressure and sensor temperature.
+    pub pressure: Option<PressureReading>,
     /// Current RTC timestamp for periodic log sync.
     pub rtc: Option<&'a TimeStruct>,
 }
@@ -391,6 +413,20 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
         }
     }
 
+    /// Emit barometric pressure telemetry reading if scheduled.
+    ///
+    /// Returns `Ok(true)` if reading was formatted and emitted.
+    pub fn emit_pressure(&mut self, now_ticks: u64, reading: &PressureReading) -> HalResult<bool> {
+        if now_ticks >= self.state.pressure_deadline {
+            self.state.pressure_deadline = now_ticks + self.config.pressure_interval;
+            let record = TelemetryRecord::Pressure(*reading);
+            self.dispatch_record(&record)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Perform periodic SD card sync and timestamp write if scheduled and `sd_on` is active.
     ///
     /// Returns `Ok(true)` if sync was performed.
@@ -405,6 +441,46 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
         }
     }
 
+    /// Execute a remote control command parsed from a UDP packet, updating application state
+    /// and returning the response string to send back.
+    pub fn execute_remote_command(
+        &mut self,
+        cmd: &crate::commands::Command,
+        rtc: Option<&TimeStruct>,
+    ) -> HalResult<alloc::string::String> {
+        struct Handler<'a, D: EthernetDevice, S: LogSink> {
+            app: &'a mut App<D, S>,
+            rtc: Option<&'a TimeStruct>,
+        }
+
+        impl<'a, D: EthernetDevice, S: LogSink> crate::commands::CommandHandler for Handler<'a, D, S> {
+            fn is_sd_enabled(&self) -> bool {
+                self.app.is_sd_enabled()
+            }
+            fn set_sd_enabled(&mut self, enabled: bool) {
+                self.app.set_sd_enabled(enabled);
+            }
+            fn is_eth_enabled(&self) -> bool {
+                self.app.is_eth_enabled()
+            }
+            fn set_eth_enabled(&mut self, enabled: bool) {
+                self.app.set_eth_enabled(enabled);
+            }
+            fn current_ip(&self) -> [u8; 4] {
+                self.app.net.current_ip()
+            }
+            fn rtc_string(&self) -> Option<alloc::string::String> {
+                self.rtc.map(|r| r.to_iso())
+            }
+            fn sync_storage(&mut self) -> Result<(), crate::hal::HalError> {
+                self.app.logger.sync()
+            }
+        }
+
+        let mut handler = Handler { app: self, rtc };
+        Ok(crate::commands::execute_command(cmd, &mut handler))
+    }
+
     /// Execute one comprehensive iteration of the application super-loop.
     pub fn step<'a>(&mut self, now_ticks: u64, inputs: SensorInputs<'a>) -> HalResult<StepReport> {
         let mut report = StepReport::default();
@@ -413,6 +489,20 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
         let rx_pkts = self.poll_network(now_ticks)?;
         report.network_polled = true;
         report.received_packets = rx_pkts.len();
+
+        // 1b. Remote command execution
+        for pkt in &rx_pkts {
+            if pkt.dest_port == self.config.command_port || pkt.dest_port == self.config.local_port
+            {
+                if let Ok(cmd_str) = pkt.as_str() {
+                    let cmd = crate::commands::Command::parse(cmd_str);
+                    let reply = self.execute_remote_command(&cmd, inputs.rtc)?;
+                    self.net
+                        .send_udp_reply(reply.as_bytes(), pkt, self.config.local_port)?;
+                    report.commands_executed += 1;
+                }
+            }
+        }
 
         // 2. Keypad scanning
         if let Some(keys) = inputs.keys {
@@ -434,7 +524,12 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
             report.temp_emitted = self.emit_temperature(now_ticks, &temp, pwr)?;
         }
 
-        // 6. Periodic SD sync & RTC timestamp
+        // 6. Barometric pressure telemetry
+        if let Some(ref pressure) = inputs.pressure {
+            report.pressure_emitted = self.emit_pressure(now_ticks, pressure)?;
+        }
+
+        // 7. Periodic SD sync & RTC timestamp
         if let Some(rtc) = inputs.rtc {
             report.file_synced = self.sync_storage(now_ticks, rtc)?;
         }
@@ -691,6 +786,30 @@ mod tests {
     }
 
     #[test]
+    fn pressure_emission_dispatches_at_deadline() {
+        let (mut app, eth, sink) = test_app();
+        app.start(0, &sample_rtc()).unwrap();
+
+        let reading = PressureReading {
+            pressure: 1013.2,
+            temperature: 24.5,
+        };
+
+        // Before deadline (tick 4000 < 5000) -> should not emit
+        let emitted = app.emit_pressure(4000, &reading).unwrap();
+        assert!(!emitted);
+
+        // At deadline (tick 5000) -> should emit
+        let emitted = app.emit_pressure(5000, &reading).unwrap();
+        assert!(emitted);
+
+        let lines = sink.lines.borrow();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "Pressure-1013.2,24.5*");
+        assert_eq!(eth.tx_frames.borrow().len(), 1);
+    }
+
+    #[test]
     fn file_sync_storage_at_file_reload_time() {
         let (mut app, _eth, sink) = test_app();
         let rtc = sample_rtc();
@@ -718,6 +837,10 @@ mod tests {
             compass: Some(Orientation::default()),
             gps: Some(&GpsData::default()),
             temp: Some(([20.0, 21.0, 22.0], 12.0)),
+            pressure: Some(PressureReading {
+                pressure: 1013.2,
+                temperature: 24.5,
+            }),
             rtc: Some(&rtc),
         };
 
@@ -729,11 +852,12 @@ mod tests {
         assert!(report.acc_emitted);
         assert!(report.compass_gps_emitted);
         assert!(report.temp_emitted);
+        assert!(report.pressure_emitted);
         assert!(report.file_synced);
         assert_eq!(report.received_packets, 0);
 
         // Multiple lines written to SD
-        assert!(sink.lines.borrow().len() >= 5);
+        assert!(sink.lines.borrow().len() >= 6);
     }
 
     #[test]
@@ -748,5 +872,33 @@ mod tests {
         let mut hw = MockWatchdogFeed { bytes: Vec::new() };
         app.feed_watchdog_feed(&mut hw);
         assert_eq!(hw.bytes, vec![0xAA, 0x55]);
+    }
+
+    #[test]
+    fn remote_command_execution_via_udp() {
+        let (mut app, eth, _sink) = test_app();
+        let rtc = sample_rtc();
+        app.start(0, &rtc).unwrap();
+
+        // Queue an incoming UDP packet containing "PING"
+        let ep = crate::udp::Endpoint {
+            local_mac: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+            remote_mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+            local_ip: [192, 168, 2, 50],
+            remote_ip: [192, 168, 2, 101],
+        };
+        let frame = crate::udp::build_udp_frame(b"PING\r\n", 50000, 22223, &ep).unwrap();
+        eth.rx_queue.borrow_mut().push_back(frame);
+
+        let report = app.step(100, SensorInputs::default()).unwrap();
+        assert_eq!(report.received_packets, 1);
+        assert_eq!(report.commands_executed, 1);
+
+        // Check reply transmitted
+        let tx = eth.tx_frames.borrow();
+        assert_eq!(tx.len(), 1);
+        let reply_frame = &tx[0];
+        let reply_view = crate::udp::parse_frame(reply_frame).unwrap();
+        assert_eq!(reply_view.payload, b"PONG\r\n");
     }
 }

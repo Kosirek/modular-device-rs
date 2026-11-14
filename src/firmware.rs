@@ -12,14 +12,29 @@ use cortex_m_rt::entry;
 use embedded_alloc::LlffHeap as Heap;
 use panic_halt as _;
 
-// Re-use all driver/protocol logic from the library crate.
-use um_rust as _;
+use um_rust::app::{App, AppConfig, SensorInputs};
+use um_rust::hal::{EthernetConfig, HalResult, LogSink, MonotonicClock};
+use um_rust::leds::{Led, LedManager};
+use um_rust::lpc17xx::Lpc17xxPeripherals;
+use um_rust::net_stack::NetworkStack;
+use um_rust::power::PowerManager;
+use um_rust::telemetry::DataLogger;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
 /// Size of the heap in bytes. Adjust based on available RAM.
 const HEAP_SIZE: usize = 4096;
+
+struct FirmwareLogSink;
+impl LogSink for FirmwareLogSink {
+    fn write_line(&mut self, _line: &str) -> HalResult<()> {
+        Ok(())
+    }
+    fn flush(&mut self) -> HalResult<()> {
+        Ok(())
+    }
+}
 
 #[entry]
 fn main() -> ! {
@@ -32,27 +47,31 @@ fn main() -> ! {
         }
     }
 
-    // Peripheral initialization and App super-loop:
-    //
-    // 1. Initialise LPC1768 peripheral wrappers implementing hal traits:
-    //    * EMAC -> hal::EthernetDevice
-    //    * SD/SPI -> hal::LogSink (via embedded-sdmmc and storage::SdLogSink)
-    //    * Sensors -> Accelerometer, Compass, Temperature, Gps, Keypad
-    //
-    // 2. Wire into application coordinator:
-    //    let net_stack = um_rust::net_stack::NetworkStack::new(emac, eth_config);
-    //    let logger = um_rust::telemetry::DataLogger::new(sd_log_sink);
-    //    let mut app = um_rust::app::App::new(net_stack, logger, app_config);
-    //    app.start(0, &rtc_time).unwrap();
-    //
-    // 3. Super-loop execution:
-    //    loop {
-    //        let now_ticks = timer.now();
-    //        app.step(now_ticks, inputs).ok();
-    //        cortex_m::asm::wfi();
-    //    }
+    // 1. Initialise LPC1768 hardware peripheral wrappers
+    let mut periph = unsafe { Lpc17xxPeripherals::hardware() };
+    periph.leds.init_pins();
 
+    // 2. Power up default sensor rails (GPS, Compass, Acc2, SD 3V3, Temp, Pressure)
+    let _power = PowerManager::with_default_board_power(periph.power_port).ok();
+
+    // 3. Status signaling (turn on heartbeat LED)
+    let mut leds = LedManager::new(periph.leds);
+    leds.on(Led::Led2).ok();
+
+    // 4. Initialise real-time clock and read boot time
+    let rtc_time = periph.rtc.current_time();
+
+    // 5. Wire into application coordinator
+    let eth_config = EthernetConfig::default();
+    let net = NetworkStack::new(periph.emac, eth_config);
+    let logger = DataLogger::new(FirmwareLogSink);
+    let mut app = App::new(net, logger, AppConfig::default());
+    app.start(0, &rtc_time).ok();
+
+    // 6. Super-loop execution
     loop {
+        let now_ticks = periph.timer.now_us();
+        app.step(now_ticks, SensorInputs::default()).ok();
         cortex_m::asm::wfi();
     }
 }
