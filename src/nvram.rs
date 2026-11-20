@@ -13,9 +13,15 @@ use alloc::string::String;
 
 pub const CONFIG_MAGIC: &[u8; 8] = b"UMCFG01\0";
 pub const PANIC_MAGIC: &[u8; 8] = b"UMPANIC1";
+pub const TELEMETRY_MAGIC: &[u8; 8] = b"UMTEL01\0";
 
 pub const CONFIG_EEPROM_ADDR: u32 = 0x0000;
 pub const PANIC_EEPROM_ADDR: u32 = 0x0100;
+
+/// First page available for emergency offline telemetry buffering.
+pub const OFFLINE_START_PAGE: u32 = 2;
+/// Total number of 256-byte pages allocated for the circular telemetry buffer.
+pub const OFFLINE_PAGE_COUNT: u32 = 510;
 
 /// Standard CRC16-CCITT (polynomial 0x1021, init 0xFFFF).
 pub fn crc16(data: &[u8]) -> u16 {
@@ -287,6 +293,83 @@ impl PanicRecord {
     }
 }
 
+/// Compact telemetry record saved to offline emergency EEPROM buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineRecord {
+    pub sequence: u32,
+    pub timestamp: Option<TimeStruct>,
+    pub data: String,
+}
+
+impl OfflineRecord {
+    pub fn serialize(&self) -> [u8; PAGE_SIZE as usize] {
+        let mut buf = [0u8; PAGE_SIZE as usize];
+        buf[0..8].copy_from_slice(TELEMETRY_MAGIC);
+
+        buf[8..12].copy_from_slice(&self.sequence.to_be_bytes());
+
+        if let Some(ref t) = self.timestamp {
+            buf[12] = 1;
+            buf[13..15].copy_from_slice(&t.year.to_be_bytes());
+            buf[15] = t.month;
+            buf[16] = t.day_of_month;
+            buf[17] = t.hour;
+            buf[18] = t.minute;
+            buf[19] = t.second;
+        } else {
+            buf[12] = 0;
+        }
+
+        let d_bytes = self.data.as_bytes();
+        let len = d_bytes.len().min(230);
+        buf[20..22].copy_from_slice(&(len as u16).to_be_bytes());
+        buf[22..22 + len].copy_from_slice(&d_bytes[..len]);
+
+        let crc = crc16(&buf[0..254]);
+        buf[254..256].copy_from_slice(&crc.to_be_bytes());
+        buf
+    }
+
+    pub fn deserialize(buf: &[u8; PAGE_SIZE as usize]) -> Result<Self, NvramError> {
+        if &buf[0..8] != TELEMETRY_MAGIC {
+            return Err(NvramError::InvalidMagic);
+        }
+        let expected_crc = u16::from_be_bytes([buf[254], buf[255]]);
+        let actual_crc = crc16(&buf[0..254]);
+        if expected_crc != actual_crc {
+            return Err(NvramError::ChecksumMismatch);
+        }
+
+        let sequence = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+
+        let timestamp = if buf[12] == 1 {
+            let year = u16::from_be_bytes([buf[13], buf[14]]);
+            Some(TimeStruct {
+                year,
+                month: buf[15],
+                day_of_month: buf[16],
+                day_of_week: 0,
+                hour: buf[17],
+                minute: buf[18],
+                second: buf[19],
+                day_of_year: 0,
+            })
+        } else {
+            None
+        };
+
+        let len = u16::from_be_bytes([buf[20], buf[21]]) as usize;
+        let data_slice = &buf[22..22 + len.min(230)];
+        let data = String::from_utf8_lossy(data_slice).into();
+
+        Ok(Self {
+            sequence,
+            timestamp,
+            data,
+        })
+    }
+}
+
 /// Abstract non-volatile memory device interface.
 pub trait NvramDevice {
     fn read_bytes(&mut self, addr: u32, buf: &mut [u8]) -> HalResult<()>;
@@ -418,6 +501,36 @@ impl<D: NvramDevice> NvramManager<D> {
             None
         }
     }
+
+    /// Write a telemetry record into the offline emergency circular buffer in EEPROM.
+    ///
+    /// Stores the serialized payload in page `OFFLINE_START_PAGE + (sequence % OFFLINE_PAGE_COUNT)`.
+    pub fn log_offline_telemetry(
+        &mut self,
+        sequence: u32,
+        data: &str,
+        time: Option<&TimeStruct>,
+    ) -> HalResult<u32> {
+        let slot = sequence % OFFLINE_PAGE_COUNT;
+        let page_addr = (OFFLINE_START_PAGE + slot) * PAGE_SIZE;
+
+        let record = OfflineRecord {
+            sequence,
+            timestamp: time.cloned(),
+            data: data.into(),
+        };
+        let buf = record.serialize();
+        self.device.write_bytes(page_addr, &buf)?;
+        Ok(slot)
+    }
+
+    /// Read an offline telemetry record from the specified slot (0..509).
+    pub fn read_offline_telemetry(&mut self, slot: u32) -> Result<OfflineRecord, NvramError> {
+        let page_addr = (OFFLINE_START_PAGE + (slot % OFFLINE_PAGE_COUNT)) * PAGE_SIZE;
+        let mut buf = [0u8; PAGE_SIZE as usize];
+        self.device.read_bytes(page_addr, &mut buf)?;
+        OfflineRecord::deserialize(&buf)
+    }
 }
 
 #[cfg(test)]
@@ -525,5 +638,44 @@ mod tests {
         let crash = mgr.read_last_crash().unwrap();
         assert_eq!(crash.message, "HardFault: Bus error at 0x2009C000");
         assert_eq!(crash.timestamp.unwrap().year, 2024);
+    }
+
+    #[test]
+    fn offline_telemetry_buffering_and_ring_wrapping() {
+        let mut nvram = InMemoryNvram::default();
+        let mut mgr = NvramManager::new(&mut nvram);
+
+        let rtc = TimeStruct {
+            year: 2024,
+            month: 11,
+            day_of_month: 20,
+            hour: 18,
+            minute: 0,
+            second: 10,
+            ..Default::default()
+        };
+
+        // 1. Log first telemetry record
+        let slot0 = mgr
+            .log_offline_telemetry(0, "Accelerometer-X10,Y-20,Z30*", Some(&rtc))
+            .unwrap();
+        assert_eq!(slot0, 0);
+
+        // 2. Read back
+        let rec0 = mgr.read_offline_telemetry(0).unwrap();
+        assert_eq!(rec0.sequence, 0);
+        assert_eq!(rec0.data, "Accelerometer-X10,Y-20,Z30*");
+        assert_eq!(rec0.timestamp.unwrap().hour, 18);
+
+        // 3. Test ring buffer wrapping: sequence 510 should map to slot 0
+        let slot_wrap = mgr
+            .log_offline_telemetry(510, "GPS_time-180010*", None)
+            .unwrap();
+        assert_eq!(slot_wrap, 0);
+
+        let rec_wrap = mgr.read_offline_telemetry(0).unwrap();
+        assert_eq!(rec_wrap.sequence, 510);
+        assert_eq!(rec_wrap.data, "GPS_time-180010*");
+        assert!(rec_wrap.timestamp.is_none());
     }
 }
