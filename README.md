@@ -48,9 +48,11 @@ tested off-target. This port applies a few principles:
 | `mainPrg.c get_key` | `keys`                 | switch bitmask combining (`embedded-hal` InputPin) |
 | `wtd.c`             | `watchdog`             | WDTC reload maths + feed sequence                |
 | `logs.c`            | `logs`                 | timestamped line formatting (in-memory sink)     |
-| `mmcbb.c` + `ff.c`  | `storage`              | SD+FAT via `embedded-sdmmc`; append/read `DEBUG.LOG` (RAM disk) |
-| `mainPrg.c UDP rx`  | `commands`             | Remote control UDP command parser (PING, STATUS, LOG, ETH, SYNC, HELP) |
-| `LPC17xx registers` | `lpc17xx`              | PAC MMIO register adapters (`Lpc17xxPin`, `PowerPort`, `LedDriver`, `WatchdogFeed`, `RtcRegisters`, `MonotonicClock`, `Emac`) |
+| `mmcbb.c` + `ff.c`  | `storage`              | SD+FAT via `embedded-sdmmc`; append/read `DEBUG.LOG`, RTC timestamping (`RtcTimeSource`) |
+| `mainPrg.c UDP rx`  | `commands`             | Remote control UDP command parser (PING, STATUS, LOG, ETH, SYNC, POWER, CONFIG, SET INTERVAL, SET IP, REBOOT, HELP) |
+| `DP83848 PHY`       | `phy`                  | National DP83848 RMII Ethernet PHY transceiver over MII management bus |
+| `NVRAM / EEPROM`    | `nvram`                | Persistent board configuration, boot counter, crash dumps, and offline telemetry ring buffer |
+| `LPC17xx registers` | `lpc17xx`              | PAC MMIO register adapters (`Lpc17xxPin`, `PowerPort`, `LedDriver`, `WatchdogFeed`, `RtcRegisters`, `MonotonicClock`, `Emac`, `Uart`, `Adc`, `Ssp`) |
 
 ## Try it
 

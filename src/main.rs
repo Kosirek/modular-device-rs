@@ -193,5 +193,34 @@ fn main() {
     let reply = app.execute_remote_command(&cmd, Some(&now)).unwrap();
     println!("commands: executed 'STATUS' -> {}", reply.trim_end());
 
+    let cmd = um_rust::commands::Command::parse("SET INTERVAL ACC 250");
+    let reply = app.execute_remote_command(&cmd, Some(&now)).unwrap();
+    println!("commands: executed 'SET INTERVAL' -> {}", reply.trim_end());
+
+    let cmd = um_rust::commands::Command::parse("SET IP 192.168.1.120 255.255.255.0 192.168.1.1");
+    let reply = app.execute_remote_command(&cmd, Some(&now)).unwrap();
+    println!("commands: executed 'SET IP' -> {}", reply.trim_end());
+
+    // --- NVRAM Manager & Offline Telemetry Buffering ---
+    let mut nvram = um_rust::nvram::NvramManager::new(um_rust::nvram::InMemoryNvram::default());
+    let mut cfg = um_rust::nvram::NvramConfig::default_board();
+    cfg.acc_interval = 250;
+    nvram.save_config(&cfg).expect("save config");
+    let loaded = nvram.load_config();
+    println!(
+        "nvram: saved & loaded config: acc_interval={}, boot_count={}",
+        loaded.acc_interval, loaded.boot_count
+    );
+    let slot = nvram
+        .log_offline_telemetry(1, "ACC X=5 Y=-10 Z=120", Some(&now))
+        .expect("log offline telemetry");
+    let rec = nvram
+        .read_offline_telemetry(slot)
+        .expect("read offline telemetry");
+    println!(
+        "offline telemetry: stored in slot {}: seq={}, data='{}'",
+        slot, rec.sequence, rec.data
+    );
+
     println!("== done ==");
 }

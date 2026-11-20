@@ -12,10 +12,13 @@ use cortex_m_rt::entry;
 use embedded_alloc::LlffHeap as Heap;
 
 use um_rust::app::{App, AppConfig, SensorInputs};
+use um_rust::eeprom::Eeprom;
 use um_rust::hal::{EthernetConfig, HalResult, LogSink, MonotonicClock};
 use um_rust::leds::{Led, LedManager};
 use um_rust::lpc17xx::Lpc17xxPeripherals;
 use um_rust::net_stack::NetworkStack;
+use um_rust::nvram::NvramManager;
+use um_rust::phy::{Dp83848, DP83848_DEFAULT_ADDR};
 use um_rust::power::PowerManager;
 use um_rust::telemetry::DataLogger;
 
@@ -84,16 +87,45 @@ fn main() -> ! {
     // 4. Initialise real-time clock and read boot time
     let rtc_time = periph.rtc.current_time();
 
-    // 5. Wire into application coordinator
+    // 5. Initialise PHY link check before moving EMAC into network stack
+    let initial_phy_link = {
+        let mut phy = Dp83848::new(&mut periph.emac, DP83848_DEFAULT_ADDR);
+        phy.is_link_up().unwrap_or(true)
+    };
+
+    // 6. Wire into application coordinator
     let eth_config = EthernetConfig::default();
     let net = NetworkStack::new(periph.emac, eth_config);
     let logger = DataLogger::new(FirmwareLogSink);
     let mut app = App::new(net, logger, AppConfig::default());
+    app.set_phy_link_up(initial_phy_link);
+
+    // 7. Load persistent settings from NVRAM EEPROM if present
+    let eeprom = Eeprom::new(periph.ssp);
+    let mut nvram = NvramManager::new(eeprom);
+    let config = nvram.load_config();
+    app.apply_nvram_config(&config);
+    let _ = nvram.increment_boot_count();
+
     app.start(0, &rtc_time).ok();
 
-    // 6. Super-loop execution
+    // 8. Super-loop execution
+    let mut last_link_check = 0u64;
     loop {
         let now_ticks = periph.timer.now_us();
+
+        // Feed hardware watchdog on every loop iteration
+        app.feed_watchdog_feed(&mut periph.watchdog);
+
+        // Periodic PHY link status monitor
+        if now_ticks.saturating_sub(last_link_check) >= app.config().link_interval {
+            last_link_check = now_ticks;
+            let mut phy = Dp83848::new(app.net_mut().device_mut(), DP83848_DEFAULT_ADDR);
+            if let Ok(up) = phy.is_link_up() {
+                app.set_phy_link_up(up);
+            }
+        }
+
         app.step(now_ticks, SensorInputs::default()).ok();
 
         // Check if remote UDP command requested a reboot
