@@ -35,6 +35,16 @@ pub const TIMER0_BASE: usize = 0x4000_4000;
 pub const WDT_BASE: usize = 0x4000_0000;
 pub const EMAC_BASE: usize = 0x5000_0000;
 
+pub const UART0_BASE: usize = 0x4000_C000;
+pub const UART1_BASE: usize = 0x4001_0000;
+pub const UART2_BASE: usize = 0x4009_8000;
+pub const UART3_BASE: usize = 0x4009_C000;
+
+pub const ADC_BASE: usize = 0x4003_4000;
+
+pub const SSP0_BASE: usize = 0x4008_8000;
+pub const SSP1_BASE: usize = 0x4003_0000;
+
 // ---------------------------------------------------------------------------
 // Hardware Register Block Layouts
 // ---------------------------------------------------------------------------
@@ -132,6 +142,79 @@ pub struct EmacBlock {
     pub tx_descriptor_number: u32,
     pub tx_produce_index: u32,
     pub tx_consume_index: u32,
+}
+
+/// LPC1768 UART register block (`LPC_UART0..3`).
+#[repr(C)]
+pub struct UartBlock {
+    /// RBR (read), THR (write), DLL (when DLAB=1).
+    pub rbr_thr_dll: u32,
+    /// IER (when DLAB=0), DLM (when DLAB=1).
+    pub ier_dlm: u32,
+    /// IIR (read), FCR (write).
+    pub iir_fcr: u32,
+    /// Line Control Register.
+    pub lcr: u32,
+    /// Modem Control Register.
+    pub mcr: u32,
+    /// Line Status Register.
+    pub lsr: u32,
+    /// Modem Status Register.
+    pub msr: u32,
+    /// Scratch Pad Register.
+    pub scr: u32,
+    /// Auto-baud Control Register.
+    pub acr: u32,
+    /// IrDA Control Register.
+    pub icr: u32,
+    /// Fractional Divider Register.
+    pub fdr: u32,
+    _pad0: u32,
+    /// Transmit Enable Register.
+    pub ter: u32,
+}
+
+/// LPC1768 Analog-to-Digital Converter register block (`LPC_ADC`).
+#[repr(C)]
+pub struct AdcBlock {
+    /// A/D Control Register.
+    pub cr: u32,
+    /// A/D Global Data Register.
+    pub gdr: u32,
+    _pad0: u32,
+    /// A/D Interrupt Enable Register.
+    pub inten: u32,
+    /// A/D Channel Data Registers 0..7.
+    pub dr: [u32; 8],
+    /// A/D Status Register.
+    pub stat: u32,
+    /// A/D Trim Register.
+    pub trim: u32,
+}
+
+/// LPC1768 Synchronous Serial Port register block (`LPC_SSP0..1`).
+#[repr(C)]
+pub struct SspBlock {
+    /// Control Register 0.
+    pub cr0: u32,
+    /// Control Register 1.
+    pub cr1: u32,
+    /// Data Register (Rx/Tx FIFO).
+    pub dr: u32,
+    /// Status Register.
+    pub sr: u32,
+    /// Clock Prescale Register.
+    pub cpsr: u32,
+    /// Interrupt Mask Set/Clear Register.
+    pub imsc: u32,
+    /// Raw Interrupt Status Register.
+    pub ris: u32,
+    /// Masked Interrupt Status Register.
+    pub mis: u32,
+    /// Interrupt Clear Register.
+    pub icr: u32,
+    /// DMA Control Register.
+    pub dmacr: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +664,239 @@ impl crate::phy::MiiBus for Lpc17xxEmac {
     }
 }
 
+/// LPC1768 UART serial port adapter (for GPS / NMEA and debugging).
+pub struct Lpc17xxUart {
+    raw: *mut UartBlock,
+}
+
+impl Lpc17xxUart {
+    /// Instantiate hardware UART adapter for a specific port (0..3).
+    ///
+    /// # Safety
+    /// Must only be called on target hardware where `port` registers exist.
+    pub const unsafe fn hardware(port: u8) -> Self {
+        let base = match port {
+            0 => UART0_BASE,
+            1 => UART1_BASE,
+            2 => UART2_BASE,
+            _ => UART3_BASE,
+        };
+        Self {
+            raw: base as *mut UartBlock,
+        }
+    }
+
+    /// Create from raw pointer for testing.
+    ///
+    /// # Safety
+    /// `raw` must point to a valid, aligned [`UartBlock`].
+    pub const unsafe fn from_raw(raw: *mut UartBlock) -> Self {
+        Self { raw }
+    }
+
+    /// Check if a byte is available in the receive buffer (`LSR` bit 0, RDR).
+    pub fn has_rx_data(&self) -> bool {
+        unsafe { (read_volatile(&(*self.raw).lsr) & 0x01) != 0 }
+    }
+
+    /// Read a single byte from the receiver buffer if available.
+    pub fn read_byte(&mut self) -> Option<u8> {
+        if self.has_rx_data() {
+            unsafe { Some((read_volatile(&(*self.raw).rbr_thr_dll) & 0xFF) as u8) }
+        } else {
+            None
+        }
+    }
+
+    /// Check if the transmitter holding register is empty (`LSR` bit 5, THRE).
+    pub fn is_tx_ready(&self) -> bool {
+        unsafe { (read_volatile(&(*self.raw).lsr) & 0x20) != 0 }
+    }
+
+    /// Transmit a single byte, busy-waiting until transmitter is ready.
+    pub fn write_byte(&mut self, byte: u8) {
+        while !self.is_tx_ready() {
+            core::hint::spin_loop();
+        }
+        unsafe {
+            write_volatile(&mut (*self.raw).rbr_thr_dll, byte as u32);
+        }
+    }
+
+    /// Transmit a slice of bytes.
+    pub fn write_all(&mut self, data: &[u8]) {
+        for &b in data {
+            self.write_byte(b);
+        }
+    }
+}
+
+/// LPC1768 12-bit ADC adapter implementing [`crate::hal::Adc`].
+pub struct Lpc17xxAdc {
+    raw: *mut AdcBlock,
+}
+
+impl Lpc17xxAdc {
+    /// Point to LPC1768 physical `ADC_BASE`.
+    ///
+    /// # Safety
+    /// Must only be called on target hardware where `ADC_BASE` exists.
+    pub const unsafe fn hardware() -> Self {
+        Self {
+            raw: ADC_BASE as *mut AdcBlock,
+        }
+    }
+
+    /// Create from raw pointer for testing.
+    ///
+    /// # Safety
+    /// `raw` must point to a valid, aligned [`AdcBlock`].
+    pub const unsafe fn from_raw(raw: *mut AdcBlock) -> Self {
+        Self { raw }
+    }
+
+    /// Initialize ADC power (`PDN` bit 21) and configure clock divider.
+    pub fn init(&mut self, clkdiv: u8) {
+        unsafe {
+            let cr = (1 << 21) | ((clkdiv as u32) << 8);
+            write_volatile(&mut (*self.raw).cr, cr);
+        }
+    }
+
+    /// Read raw 12-bit conversion result from specified channel (0..7).
+    pub fn read_channel_raw(&mut self, channel: u8) -> u16 {
+        let ch = (channel & 0x07) as usize;
+        unsafe {
+            let cr = read_volatile(&(*self.raw).cr);
+            let start_cr = (cr & !0x0700_00FF) | (1 << ch) | (1 << 24);
+            write_volatile(&mut (*self.raw).cr, start_cr);
+
+            let mut timeout = 100_000;
+            while (read_volatile(&(*self.raw).dr[ch]) & (1 << 31)) == 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    break;
+                }
+            }
+
+            let dr = read_volatile(&(*self.raw).dr[ch]);
+            ((dr >> 4) & 0x0FFF) as u16
+        }
+    }
+}
+
+impl crate::hal::Adc for Lpc17xxAdc {
+    fn read_channel(&mut self, channel: u8) -> u16 {
+        self.read_channel_raw(channel)
+    }
+}
+
+/// LPC1768 Synchronous Serial Port adapter (SPI mode for EEPROM, SD card, sensors).
+pub struct Lpc17xxSsp {
+    raw: *mut SspBlock,
+}
+
+impl Lpc17xxSsp {
+    /// Point to LPC1768 physical SSP0 or SSP1.
+    ///
+    /// # Safety
+    /// Must only be called on target hardware where `port` (0 or 1) registers exist.
+    pub const unsafe fn hardware(port: u8) -> Self {
+        let base = match port {
+            0 => SSP0_BASE,
+            _ => SSP1_BASE,
+        };
+        Self {
+            raw: base as *mut SspBlock,
+        }
+    }
+
+    /// Create from raw pointer for testing.
+    ///
+    /// # Safety
+    /// `raw` must point to a valid, aligned [`SspBlock`].
+    pub const unsafe fn from_raw(raw: *mut SspBlock) -> Self {
+        Self { raw }
+    }
+
+    /// Transfer a single byte over SPI, returning received byte.
+    pub fn transfer_byte(&mut self, byte: u8) -> HalResult<u8> {
+        unsafe {
+            let mut timeout = 100_000;
+            while (read_volatile(&(*self.raw).sr) & (1 << 1)) == 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    return Err(HalError::Timeout);
+                }
+            }
+
+            write_volatile(&mut (*self.raw).dr, byte as u32);
+
+            timeout = 100_000;
+            while (read_volatile(&(*self.raw).sr) & (1 << 2)) == 0 {
+                timeout -= 1;
+                if timeout == 0 {
+                    return Err(HalError::Timeout);
+                }
+            }
+
+            let rx = read_volatile(&(*self.raw).dr);
+            Ok((rx & 0xFF) as u8)
+        }
+    }
+
+    /// Full-duplex transfer of a buffer.
+    pub fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> HalResult<()> {
+        let len = read.len().min(write.len());
+        for i in 0..len {
+            read[i] = self.transfer_byte(write[i])?;
+        }
+        Ok(())
+    }
+
+    /// Half-duplex write of a slice.
+    pub fn write_all(&mut self, data: &[u8]) -> HalResult<()> {
+        for &b in data {
+            self.transfer_byte(b)?;
+        }
+        Ok(())
+    }
+}
+
+impl embedded_hal::spi::ErrorType for Lpc17xxSsp {
+    type Error = HalError;
+}
+
+impl embedded_hal::spi::SpiDevice for Lpc17xxSsp {
+    fn transaction(
+        &mut self,
+        operations: &mut [embedded_hal::spi::Operation<'_, u8>],
+    ) -> Result<(), Self::Error> {
+        for op in operations {
+            match op {
+                embedded_hal::spi::Operation::Read(buf) => {
+                    for b in buf.iter_mut() {
+                        *b = self.transfer_byte(0xFF)?;
+                    }
+                }
+                embedded_hal::spi::Operation::Write(buf) => {
+                    self.write_all(buf)?;
+                }
+                embedded_hal::spi::Operation::Transfer(read, write) => {
+                    self.transfer(read, write)?;
+                }
+                embedded_hal::spi::Operation::TransferInPlace(buf) => {
+                    for b in buf.iter_mut() {
+                        *b = self.transfer_byte(*b)?;
+                    }
+                }
+                embedded_hal::spi::Operation::DelayNs(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Unified LPC1768 peripherals container.
 pub struct Lpc17xxPeripherals {
     pub power_port: Lpc17xxPowerPort,
@@ -589,6 +905,9 @@ pub struct Lpc17xxPeripherals {
     pub rtc: Lpc17xxRtc,
     pub timer: Lpc17xxTimer,
     pub emac: Lpc17xxEmac,
+    pub uart: Lpc17xxUart,
+    pub adc: Lpc17xxAdc,
+    pub ssp: Lpc17xxSsp,
 }
 
 impl Lpc17xxPeripherals {
@@ -604,6 +923,9 @@ impl Lpc17xxPeripherals {
             rtc: Lpc17xxRtc::hardware(),
             timer: Lpc17xxTimer::hardware(),
             emac: Lpc17xxEmac::hardware(),
+            uart: Lpc17xxUart::hardware(1), // Default GPS UART1
+            adc: Lpc17xxAdc::hardware(),
+            ssp: Lpc17xxSsp::hardware(0), // Default SSP0
         }
     }
 }
@@ -867,5 +1189,92 @@ mod tests {
         emac.write_phy(1, 0x00, 0x1200).unwrap();
         assert_eq!(block.madr, 1 << 8);
         assert_eq!(block.mwtd, 0x1200);
+    }
+
+    #[test]
+    fn uart_rx_and_tx() {
+        let mut block = UartBlock {
+            rbr_thr_dll: b'A' as u32,
+            ier_dlm: 0,
+            iir_fcr: 0,
+            lcr: 0,
+            mcr: 0,
+            lsr: 0x01 | 0x20, // RDR (bit 0) and THRE (bit 5)
+            msr: 0,
+            scr: 0,
+            acr: 0,
+            icr: 0,
+            fdr: 0,
+            _pad0: 0,
+            ter: 0,
+        };
+
+        let mut uart = unsafe { Lpc17xxUart::from_raw(&mut block) };
+        assert!(uart.has_rx_data());
+        assert_eq!(uart.read_byte(), Some(b'A'));
+
+        unsafe {
+            write_volatile(&mut block.lsr, 0x20); // No RX data, but TX ready
+        }
+        assert!(!uart.has_rx_data());
+        assert_eq!(uart.read_byte(), None);
+
+        uart.write_byte(b'Z');
+        assert_eq!(block.rbr_thr_dll, b'Z' as u32);
+    }
+
+    #[test]
+    fn adc_conversion_read() {
+        use crate::hal::Adc;
+
+        let mut block = AdcBlock {
+            cr: 0,
+            gdr: 0,
+            _pad0: 0,
+            inten: 0,
+            dr: [
+                (1 << 31) | (2048 << 4), // Channel 0: DONE=1, RESULT=2048
+                (1 << 31) | (1000 << 4), // Channel 1
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            stat: 0,
+            trim: 0,
+        };
+
+        let mut adc = unsafe { Lpc17xxAdc::from_raw(&mut block) };
+        adc.init(4);
+        assert_eq!(block.cr & (1 << 21), 1 << 21); // PDN set
+
+        let val = adc.read_channel(0);
+        assert_eq!(val, 2048);
+
+        let val1 = adc.read_channel(1);
+        assert_eq!(val1, 1000);
+    }
+
+    #[test]
+    fn ssp_byte_transfer() {
+        let mut block = SspBlock {
+            cr0: 0,
+            cr1: 0,
+            dr: 0,
+            sr: (1 << 1) | (1 << 2), // TNF (bit 1) and RNE (bit 2)
+            cpsr: 0,
+            imsc: 0,
+            ris: 0,
+            mis: 0,
+            icr: 0,
+            dmacr: 0,
+        };
+
+        let mut ssp = unsafe { Lpc17xxSsp::from_raw(&mut block) };
+        let rx = ssp.transfer_byte(0x5A).unwrap();
+        assert_eq!(rx, 0x5A);
+        assert_eq!(block.dr, 0x5A);
     }
 }

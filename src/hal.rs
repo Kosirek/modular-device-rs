@@ -37,6 +37,12 @@ pub enum HalError {
     Bus,
 }
 
+impl embedded_hal::spi::Error for HalError {
+    fn kind(&self) -> embedded_hal::spi::ErrorKind {
+        embedded_hal::spi::ErrorKind::Other
+    }
+}
+
 /// Single-channel ADC read (temperature / supply voltage sensing).
 ///
 /// `embedded-hal` 1.0 has no blocking ADC trait, so this stays local.
