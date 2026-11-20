@@ -47,6 +47,33 @@ impl TimeSource for FixedTime {
     }
 }
 
+/// A [`TimeSource`] backed by an RTC timestamp query function/closure.
+#[derive(Debug, Clone, Copy)]
+pub struct RtcTimeSource<F: Fn() -> crate::rtc::TimeStruct> {
+    pub get_time: F,
+}
+
+impl<F: Fn() -> crate::rtc::TimeStruct> RtcTimeSource<F> {
+    /// Create a new RTC-backed time source.
+    pub fn new(get_time: F) -> Self {
+        Self { get_time }
+    }
+}
+
+impl<F: Fn() -> crate::rtc::TimeStruct> TimeSource for RtcTimeSource<F> {
+    fn get_timestamp(&self) -> Timestamp {
+        let t = (self.get_time)();
+        Timestamp {
+            year_since_1970: t.year.saturating_sub(1970) as u8,
+            zero_indexed_month: t.month.saturating_sub(1),
+            zero_indexed_day: t.day_of_month.saturating_sub(1),
+            hours: t.hour,
+            minutes: t.minute,
+            seconds: t.second,
+        }
+    }
+}
+
 /// Append-only log file on a FAT volume — the equivalent of `logs.c` writing
 /// `debug.log` through FatFs.
 ///
@@ -359,5 +386,29 @@ mod tests {
         let text = String::from_utf8(sink.read_all().unwrap()).unwrap();
         assert!(text.contains("2024-11-07 14:30:15  Start logging ..."));
         assert!(text.contains("Accelerometer-X10,Y-20,Z30*"));
+    }
+
+    #[test]
+    fn rtc_time_source_conversion() {
+        use crate::rtc::TimeStruct;
+
+        let rtc = TimeStruct {
+            year: 2024,
+            month: 11,
+            day_of_month: 20,
+            hour: 15,
+            minute: 30,
+            second: 45,
+            ..Default::default()
+        };
+
+        let ts = RtcTimeSource::new(|| rtc);
+        let stamp = ts.get_timestamp();
+        assert_eq!(stamp.year_since_1970, 54);
+        assert_eq!(stamp.zero_indexed_month, 10);
+        assert_eq!(stamp.zero_indexed_day, 19);
+        assert_eq!(stamp.hours, 15);
+        assert_eq!(stamp.minutes, 30);
+        assert_eq!(stamp.seconds, 45);
     }
 }
