@@ -6,6 +6,54 @@
 use alloc::format;
 use alloc::string::String;
 
+/// Telemetry emission and task scheduling interval target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntervalTarget {
+    Acc,
+    Led,
+    Temp,
+    Pressure,
+    Sync,
+}
+
+impl IntervalTarget {
+    pub fn from_name(name: &str) -> Option<Self> {
+        if name.eq_ignore_ascii_case("ACC") || name.eq_ignore_ascii_case("ACCELEROMETER") {
+            Some(IntervalTarget::Acc)
+        } else if name.eq_ignore_ascii_case("LED")
+            || name.eq_ignore_ascii_case("COMPASS")
+            || name.eq_ignore_ascii_case("GPS")
+        {
+            Some(IntervalTarget::Led)
+        } else if name.eq_ignore_ascii_case("TEMP") || name.eq_ignore_ascii_case("TEMPERATURE") {
+            Some(IntervalTarget::Temp)
+        } else if name.eq_ignore_ascii_case("PRESS")
+            || name.eq_ignore_ascii_case("PRESSURE")
+            || name.eq_ignore_ascii_case("BARO")
+        {
+            Some(IntervalTarget::Pressure)
+        } else if name.eq_ignore_ascii_case("SYNC") || name.eq_ignore_ascii_case("FILE") {
+            Some(IntervalTarget::Sync)
+        } else {
+            None
+        }
+    }
+}
+
+/// Helper function to parse an IPv4 string like "192.168.2.100".
+fn parse_ipv4_addr(s: &str) -> Option<[u8; 4]> {
+    let mut parts = s.split('.');
+    let a: u8 = parts.next()?.parse().ok()?;
+    let b: u8 = parts.next()?.parse().ok()?;
+    let c: u8 = parts.next()?.parse().ok()?;
+    let d: u8 = parts.next()?.parse().ok()?;
+    if parts.next().is_none() {
+        Some([a, b, c, d])
+    } else {
+        None
+    }
+}
+
 /// Supported remote control commands sent over UDP.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -35,6 +83,14 @@ pub enum Command {
     ConfigReset,
     /// Save current configuration into persistent NVRAM (`CONFIG SAVE`).
     ConfigSave,
+    /// Set a task or telemetry scheduling interval (`SET INTERVAL <TARGET> <VALUE>` or `INTERVAL <TARGET> <VALUE>`).
+    SetInterval(IntervalTarget, u64),
+    /// Set operational IPv4 address and optional subnet and gateway (`SET IP <IP> [SUBNET] [GATEWAY]`).
+    SetIp {
+        ip: [u8; 4],
+        subnet: Option<[u8; 4]>,
+        gateway: Option<[u8; 4]>,
+    },
     /// Request software system reset / reboot (`REBOOT`).
     Reboot,
     /// Query available commands (`HELP` or `?`).
@@ -126,6 +182,57 @@ impl Command {
             } else {
                 Command::Unknown(trimmed.into())
             }
+        } else if first.eq_ignore_ascii_case("INTERVAL") {
+            if let Some(target) = IntervalTarget::from_name(second) {
+                if let Ok(val) = third.parse::<u64>() {
+                    Command::SetInterval(target, val)
+                } else {
+                    Command::Unknown(trimmed.into())
+                }
+            } else {
+                Command::Unknown(trimmed.into())
+            }
+        } else if first.eq_ignore_ascii_case("SET") {
+            if second.eq_ignore_ascii_case("INTERVAL") {
+                if let Some(target) = IntervalTarget::from_name(third) {
+                    if let Some(val_token) = tokens.next() {
+                        if let Ok(val) = val_token.parse::<u64>() {
+                            return Command::SetInterval(target, val);
+                        }
+                    }
+                }
+                Command::Unknown(trimmed.into())
+            } else if second.eq_ignore_ascii_case("IP") {
+                if let Some(ip) = parse_ipv4_addr(third) {
+                    let subnet = tokens.next().and_then(parse_ipv4_addr);
+                    let gateway = tokens.next().and_then(parse_ipv4_addr);
+                    Command::SetIp {
+                        ip,
+                        subnet,
+                        gateway,
+                    }
+                } else {
+                    Command::Unknown(trimmed.into())
+                }
+            } else {
+                Command::Unknown(trimmed.into())
+            }
+        } else if first.eq_ignore_ascii_case("IP") {
+            if let Some(ip) = parse_ipv4_addr(second) {
+                let subnet = if third.is_empty() {
+                    None
+                } else {
+                    parse_ipv4_addr(third)
+                };
+                let gateway = tokens.next().and_then(parse_ipv4_addr);
+                Command::SetIp {
+                    ip,
+                    subnet,
+                    gateway,
+                }
+            } else {
+                Command::Unknown(trimmed.into())
+            }
         } else {
             Command::Unknown(trimmed.into())
         }
@@ -184,6 +291,25 @@ pub trait CommandHandler {
 
     /// Save current active settings to persistent NVRAM.
     fn save_config(&mut self) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Update a task or telemetry scheduling interval (in milliseconds/ticks).
+    fn set_interval(
+        &mut self,
+        _target: IntervalTarget,
+        _val: u64,
+    ) -> Result<(), crate::hal::HalError> {
+        Ok(())
+    }
+
+    /// Update IPv4 configuration (IP address, subnet mask, gateway).
+    fn set_ip_config(
+        &mut self,
+        _ip: [u8; 4],
+        _subnet: Option<[u8; 4]>,
+        _gateway: Option<[u8; 4]>,
+    ) -> Result<(), crate::hal::HalError> {
         Ok(())
     }
 
@@ -275,12 +401,22 @@ pub fn execute_command<H: CommandHandler>(cmd: &Command, handler: &mut H) -> Str
             Ok(()) => String::from("OK CONFIG SAVED"),
             Err(_) => String::from("ERR CONFIG SAVE FAILED"),
         },
+        Command::SetInterval(target, val) => match handler.set_interval(*target, *val) {
+            Ok(()) => format!("OK INTERVAL {:?} {}", target, val),
+            Err(_) => String::from("ERR INTERVAL SET FAILED"),
+        },
+        Command::SetIp { ip, subnet, gateway } => {
+            match handler.set_ip_config(*ip, *subnet, *gateway) {
+                Ok(()) => format!("OK IP {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+                Err(_) => String::from("ERR IP SET FAILED"),
+            }
+        }
         Command::Reboot => {
             handler.request_reboot();
             String::from("OK REBOOTING")
         }
         Command::Help => String::from(
-            "COMMANDS: PING, STATUS, LOG <ON|OFF>, ETH <ON|OFF>, SYNC, POWER <STATUS|ALL <ON|OFF>|<DOMAIN> <ON|OFF>>, CONFIG <GET|RESET|SAVE>, REBOOT, HELP",
+            "COMMANDS: PING, STATUS, LOG <ON|OFF>, ETH <ON|OFF>, SYNC, POWER <STATUS|ALL <ON|OFF>|<DOMAIN> <ON|OFF>>, CONFIG <GET|RESET|SAVE>, SET INTERVAL <TARGET> <MS>, SET IP <IP> [SUBNET] [GW], REBOOT, HELP",
         ),
         Command::Unknown(raw) => format!("ERR UNKNOWN COMMAND: {}", raw),
     }
@@ -550,5 +686,112 @@ mod tests {
         let reboot = execute_command(&Command::Reboot, &mut h);
         assert_eq!(reboot, "OK REBOOTING");
         assert!(h.reboot_called);
+    }
+
+    #[test]
+    fn parse_and_execute_interval_and_ip() {
+        struct ConfigMock {
+            base: MockHandler,
+            interval_target: Option<IntervalTarget>,
+            interval_val: u64,
+            ip: [u8; 4],
+            subnet: Option<[u8; 4]>,
+            gateway: Option<[u8; 4]>,
+        }
+        impl CommandHandler for ConfigMock {
+            fn is_sd_enabled(&self) -> bool {
+                self.base.is_sd_enabled()
+            }
+            fn set_sd_enabled(&mut self, enabled: bool) {
+                self.base.set_sd_enabled(enabled)
+            }
+            fn is_eth_enabled(&self) -> bool {
+                self.base.is_eth_enabled()
+            }
+            fn set_eth_enabled(&mut self, enabled: bool) {
+                self.base.set_eth_enabled(enabled)
+            }
+            fn current_ip(&self) -> [u8; 4] {
+                self.base.current_ip()
+            }
+            fn rtc_string(&self) -> Option<String> {
+                self.base.rtc_string()
+            }
+            fn sync_storage(&mut self) -> Result<(), HalError> {
+                self.base.sync_storage()
+            }
+            fn set_interval(&mut self, target: IntervalTarget, val: u64) -> Result<(), HalError> {
+                self.interval_target = Some(target);
+                self.interval_val = val;
+                Ok(())
+            }
+            fn set_ip_config(
+                &mut self,
+                ip: [u8; 4],
+                subnet: Option<[u8; 4]>,
+                gateway: Option<[u8; 4]>,
+            ) -> Result<(), HalError> {
+                self.ip = ip;
+                self.subnet = subnet;
+                self.gateway = gateway;
+                Ok(())
+            }
+        }
+
+        assert_eq!(
+            Command::parse("SET INTERVAL ACC 250"),
+            Command::SetInterval(IntervalTarget::Acc, 250)
+        );
+        assert_eq!(
+            Command::parse("INTERVAL TEMP 1000"),
+            Command::SetInterval(IntervalTarget::Temp, 1000)
+        );
+        assert_eq!(
+            Command::parse("INTERVAL PRESS 500"),
+            Command::SetInterval(IntervalTarget::Pressure, 500)
+        );
+        assert_eq!(
+            Command::parse("SET IP 192.168.1.50 255.255.255.0 192.168.1.1"),
+            Command::SetIp {
+                ip: [192, 168, 1, 50],
+                subnet: Some([255, 255, 255, 0]),
+                gateway: Some([192, 168, 1, 1]),
+            }
+        );
+        assert_eq!(
+            Command::parse("IP 10.0.0.2"),
+            Command::SetIp {
+                ip: [10, 0, 0, 2],
+                subnet: None,
+                gateway: None,
+            }
+        );
+
+        let mut h = ConfigMock {
+            base: MockHandler::default(),
+            interval_target: None,
+            interval_val: 0,
+            ip: [0; 4],
+            subnet: None,
+            gateway: None,
+        };
+
+        let res = execute_command(&Command::SetInterval(IntervalTarget::Acc, 500), &mut h);
+        assert_eq!(res, "OK INTERVAL Acc 500");
+        assert_eq!(h.interval_target, Some(IntervalTarget::Acc));
+        assert_eq!(h.interval_val, 500);
+
+        let res = execute_command(
+            &Command::SetIp {
+                ip: [192, 168, 2, 120],
+                subnet: Some([255, 255, 255, 0]),
+                gateway: Some([192, 168, 2, 1]),
+            },
+            &mut h,
+        );
+        assert_eq!(res, "OK IP 192.168.2.120");
+        assert_eq!(h.ip, [192, 168, 2, 120]);
+        assert_eq!(h.subnet, Some([255, 255, 255, 0]));
+        assert_eq!(h.gateway, Some([192, 168, 2, 1]));
     }
 }

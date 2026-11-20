@@ -376,6 +376,33 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
         self.phy_link_up = up;
     }
 
+    /// Update a task or telemetry scheduling interval.
+    pub fn set_interval(&mut self, target: crate::commands::IntervalTarget, val: u64) {
+        match target {
+            crate::commands::IntervalTarget::Acc => self.config.acc_interval = val,
+            crate::commands::IntervalTarget::Led => self.config.led_interval = val,
+            crate::commands::IntervalTarget::Temp => self.config.temp_interval = val,
+            crate::commands::IntervalTarget::Pressure => self.config.pressure_interval = val,
+            crate::commands::IntervalTarget::Sync => self.config.file_sync_interval = val,
+        }
+    }
+
+    /// Update runtime IPv4 address, subnet mask, and gateway.
+    pub fn set_ip_config(
+        &mut self,
+        ip: [u8; 4],
+        subnet: Option<[u8; 4]>,
+        gateway: Option<[u8; 4]>,
+    ) {
+        self.net.set_current_ip(ip);
+        if let Some(sub) = subnet {
+            self.net.set_subnet_mask(sub);
+        }
+        if let Some(gw) = gateway {
+            self.net.set_gateway(gw);
+        }
+    }
+
     /// Apply persistent settings loaded from NVRAM configuration.
     pub fn apply_nvram_config(&mut self, nvram: &crate::nvram::NvramConfig) {
         self.config = AppConfig::from(nvram);
@@ -621,6 +648,23 @@ impl<D: EthernetDevice, S: LogSink> App<D, S> {
             }
             fn request_reboot(&mut self) {
                 self.app.request_reboot();
+            }
+            fn set_interval(
+                &mut self,
+                target: crate::commands::IntervalTarget,
+                val: u64,
+            ) -> Result<(), crate::hal::HalError> {
+                self.app.set_interval(target, val);
+                Ok(())
+            }
+            fn set_ip_config(
+                &mut self,
+                ip: [u8; 4],
+                subnet: Option<[u8; 4]>,
+                gateway: Option<[u8; 4]>,
+            ) -> Result<(), crate::hal::HalError> {
+                self.app.set_ip_config(ip, subnet, gateway);
+                Ok(())
             }
             fn link_status_string(&self) -> Option<alloc::string::String> {
                 Some(if self.app.phy_link_up() {
@@ -1099,5 +1143,23 @@ mod tests {
         let exported = app.export_nvram_config(None);
         assert_eq!(exported.ip, [10, 0, 0, 99]);
         assert_eq!(exported.acc_interval, 2500);
+
+        // 7. Test SET INTERVAL command
+        let cmd = crate::commands::Command::SetInterval(crate::commands::IntervalTarget::Acc, 1234);
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert_eq!(res, "OK INTERVAL Acc 1234");
+        assert_eq!(app.config().acc_interval, 1234);
+
+        // 8. Test SET IP command
+        let cmd = crate::commands::Command::SetIp {
+            ip: [192, 168, 5, 20],
+            subnet: Some([255, 255, 0, 0]),
+            gateway: Some([192, 168, 5, 1]),
+        };
+        let res = app.execute_remote_command(&cmd, Some(&rtc)).unwrap();
+        assert_eq!(res, "OK IP 192.168.5.20");
+        assert_eq!(app.net().current_ip(), [192, 168, 5, 20]);
+        assert_eq!(app.net().subnet_mask(), [255, 255, 0, 0]);
+        assert_eq!(app.net().gateway(), [192, 168, 5, 1]);
     }
 }
